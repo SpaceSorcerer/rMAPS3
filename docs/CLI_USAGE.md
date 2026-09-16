@@ -76,8 +76,9 @@ python cli.py motif-map mxe --help
 - `--stat-permutations` / `--statPermutations` (optional; permutation count for `permutation_one_sided`)
 - `--stat-seed` / `--statSeed` (optional; RNG seed for `permutation_one_sided`)
 - `--keep-temp` (SE retains positional tables by default; other event types retain the previous opt-in behavior)
-- SE only: `--delete-temp` (delete regular files directly inside `output/temp` after success, then remove that directory if empty; preserve `positional/*.hits.tsv`)
-- SE only: `--overwrite` (allow an existing non-empty output directory)
+- SE only: `--delete-temp` (hash then delete only this run's registered files inside `output/temp`; preserve unowned files and `positional/*.hits.npz`)
+- SE only: `--overwrite` (archive a previous manifest and its retained registered outputs under `_previous_<UTC timestamp>/`; preserve unowned files)
+- SE only: `--exon-window W` (default: `--window`; exon=window=50 produces one complete exon window)
 - SE only: `--allow-overlap` (allow identical events across up/down/background sets; duplicates within a set remain errors)
 - SE only: `--fisher-alternative greater|two-sided` (default `greater`)
 - SE only: `--workers N` (positive integer; default `max(1, min(4, cpu_count - 1))`)
@@ -120,7 +121,14 @@ loads `E:\references\rmaps_genomes\hg38\hg38.fa`. FASTA keys use the first heade
 **Windows, eligibility, and matching**
 
 - Every region uses transcript orientation. A window of length `W` starting at region position
-  `j` covers `[j, j+W)`; `--step` selects window starts. A motif overlaps when at least one of
+  `j` covers `[j, j+W)`; starts are exactly `range(0, L-W+1, step)`. The same starts index
+  reconstructed positional matrices, count distributions, and p-value tables. With L=250, W=50,
+  step=1 there are 201 intron windows; L=50 gives one exon window. `--exon-window` can
+  reduce exon W explicitly; the default preserves W=50 and its single-window consequence.
+  The single exon window still has a numerical test, but the current line renderer needs
+  at least two points and therefore draws no exon curve segment. A shorter `--exon-window`
+  enables an exon curve when it produces at least two complete windows.
+  A motif overlaps when at least one of
   its nucleotides lies inside that interval. Both strands use this same definition.
 - Intronic sequence stops at the neighboring exons; genomic sequence stops at chromosome
   boundaries. An event contributes only when it supplies the entire window. A short intron,
@@ -132,8 +140,14 @@ loads `E:\references\rmaps_genomes\hg38\hg38.fa`. FASTA keys use the first heade
   in the pattern. Overlapping matches are retained, and every hit retains its own span.
   IUPAC bracket classes such as `[AG]` are already regex-compatible; bare ambiguity letters
   are not automatically expanded. Motif species provenance remains the user's responsibility.
-- The engine scans complete true exon/intron features so regex hits can extend beyond the
-  requested windows. Very long introns can therefore increase runtime and memory use.
+<!-- AUDIT R4: bounded scans and shared worker inputs. -->
+- The engine scans only each requested region plus `(maximum motif length - 1)` on both
+  sides, clipped to the true exon/intron and chromosome boundaries. It never scans entire
+  long introns. Motif regexes require finite maximum length, strictly positive minimum
+  match width, and no context dependence;
+  unbounded quantifiers, anchors, lookarounds, and other context-dependent patterns are
+  rejected explicitly. The scalar regex helper retains its previous broader support.
+- Workers open shared read-only sequence arrays instead of receiving full sequence copies.
 - Statistical errors raise or produce explicit unavailable (`NA`) results with a reason;
   an unusable comparison is never silently replaced by `p=1`.
 
@@ -152,24 +166,42 @@ The eight region labels and junction-relative offsets corresponding to region po
 
 **Retained output and downstream calibration**
 
+<!-- AUDIT R2, R3, R4, R8, R9: owned cleanup, sparse positions, versioned provenance. -->
 - Per-motif positional p-values and count distributions in `temp/` are preserved by default.
-  `--delete-temp` removes regular files directly in `temp/` after success, including older
-  files when `--overwrite` is used, and removes the directory if empty. It leaves nested
-  directories intact.
-- `positional/<RBP>.<motif>.<region>.hits.tsv` contains one row per event, grouped as `up`,
-  `dn`, then `bg`, retaining input order within each set. Event identifiers and the `set`
-  column identify rows; numeric column headers are region-relative window starts. Values
-  are `0`, `1`, or literal `NA` for an ineligible event/window. These matrices are retained
-  even with `--delete-temp` and provide the binary observations and missingness required
-  by a downstream region-minimum calibrator.
-- Root `pVal.{up,dn}.vs.bg.RNAmap.txt` values remain **uncalibrated raw regional minima**.
-  The engine does not implement F4 calibration. Applying BH directly to these minima does
-  not correct selection across windows; downstream calibration must precede that step.
-- Non-empty output directories are refused unless `--overwrite` is supplied. Summaries
-  use only results generated in the current run, including when older files remain.
-- `run_manifest.json` records relative output paths, SHA256 hashes, byte sizes, effective
-  parameters, statistical method, permutations, seed, Python/package versions, and git revision.
-  It inventories retained current-run outputs; the manifest excludes its own hash.
+  `--delete-temp` hashes all registered files before deleting this run's temporary outputs,
+  including summary-input p-value tables. Unowned files and nested directories survive;
+  `temp/` is removed only if empty.
+- `positional/<RBP>.<regex>.<Region>.hits.npz` is a compressed NumPy archive. Event rows are
+  ordered `up`, `dn`, `bg`, preserving each coordinate file's input order. Row identity is
+  recoverable from the retained `exon/{up,dn,bg}.coord.txt` files. It remains with `--delete-temp`.
+
+| NPZ field | Meaning |
+|---|---|
+| `event_index` | int32 event row for each sparse hit |
+| `hit_start`, `hit_end` | int16 half-open hit spans in region coordinates; edge-overlapping hits may extend outside `[0,L)` |
+| `elig_lo`, `elig_hi` | Per-event first eligible start and last eligible start + 1; both -1 for no eligible windows |
+| `set_label` | Per-event label: 0=up, 1=dn, 2=bg |
+| `window`, `step`, `region_length` | Scalar window width, start spacing, and region length |
+
+- `rmaps_core.positional_io.load_hits(path)` returns `(dense_bool_matrix, eligible_mask, labels)`;
+  both matrices have shape `[n_events, len(range(0,L-W+1,step))]`. Always use eligibility when
+  computing denominators: a false cell alone does not distinguish missingness from no hit.
+- `rmaps_core.positional_io.iter_hits(path)` streams `(event_index, hit_start, hit_end)` tuples
+  without allocating the event-by-window matrix.
+- `countDist` has columns `Region, position, sum, eligible, density, values`. `values` is a
+  compact binary histogram `0:n,1:n,NA:n`; use NPZ when event identities matter.
+- Per-motif p-value tables retain their added `reason` column for unavailable comparisons.
+- Root `pVal.{up,dn}.vs.bg.RNAmap.txt` filenames and nine-column order are unchanged. Values
+  remain **uncalibrated raw regional minima**. The engine does not implement F4 calibration;
+  downstream selection-aware calibration must precede BH across these minima.
+- Non-empty output directories, including any previous `run_manifest.json`, require
+  `--overwrite`. Previous retained registered outputs and the previous manifest move into
+  `_previous_<UTC timestamp>/`; unowned files remain. Only current outputs enter summaries.
+- `run_manifest.json` has `schema_version: 2`. Each registered output has `path`, `sha256`,
+  `size_bytes`, and `status` (`retained` or `deleted`). Deleted summary inputs remain in the
+  inventory with their original hashes. Effective parameters, Python/package versions, git
+  revision, statistical method, permutations, and seed are recorded; the manifest excludes
+  its own hash. See [Migration notes](MIGRATION_2026-09.md).
 
 ```bash
 python cli.py motif-map se \

@@ -15,7 +15,7 @@ from rmaps_core.genome_access import load_genome, fetch_seq as fetch_seq_from_fa
 from rmaps_core.stat_utils import normalize_stat_method, pvalue_header_label
 from rmaps_core.se_windows import (REGION_NAMES, read_event_sets, event_regions,
                                    overlapping_hits, binary_windows, binary_table,
-                                   binary_density)
+                                   binary_density, WindowCounts, max_motif_width)
 from rmaps_core.output_utils import ensure_output_directory, write_run_manifest
 
 DRAW_MOTIF_PLOTS = (
@@ -159,6 +159,8 @@ def setup_runtime():
                         dest='step',
                         default=1,
                         help='slide window by this number of NTs at a time')
+    # AUDIT R1: exon windows inherit --window unless explicitly overridden.
+    parser.add_argument('--exon-window', type=int, default=None)
     parser.add_argument('--sigFDR',
                         type=float,
                         dest='sigFDR',
@@ -186,7 +188,9 @@ def setup_runtime():
     # AUDIT F8: existing outputs require explicit reuse authorization.
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
-    if any(value <= 0 for value in (args.intron, args.exon, args.window, args.step, args.workers)):
+    if args.exon_window is None:
+        args.exon_window = args.window
+    if any(value <= 0 for value in (args.intron, args.exon, args.window, args.exon_window, args.step, args.workers)):
         parser.error('intron, exon, window, step and workers must be positive')
     stat_method = normalize_stat_method(os.environ.get('RMAPS_STAT_METHOD', 'fisher'))
     try:
@@ -461,7 +465,7 @@ def makeInputFiles(
 
 def getFasta(t):
     # AUDIT F6: use true features, clipping chromosome edges before orientation.
-    region_data[t] = [event_regions(genome, event, iLen, eLen) for event in event_sets[t]]
+    region_data[t] = [event_regions(genome, event, iLen, eLen, motif_padding) for event in event_sets[t]]
     feature_indices = (0, 1, 2, 3, 5, 6, 7)
     for rg, index in zip(region, feature_indices):
         filename = os.path.join(fastaPath, t + '.' + rg + '.fasta')
@@ -487,26 +491,87 @@ def initMotif(mF, mc):  ## initialize motif counts
     return motifs
 
 
+def prepare_sequence_store():
+    # AUDIT R4: workers reopen immutable mmap arrays, never pickle region_data.
+    global sequence_paths, sequence_arrays, sequence_origins, sequence_lengths, sequence_labels
+    rows = [regions for label in ('up', 'dn', 'bg') for regions in region_data[label]]
+    sequence_paths = []
+    sequence_origins = numpy.array([[r.origin for r in row] for row in rows], dtype=numpy.int32)
+    sequence_lengths = numpy.array([[len(r.sequence) for r in row] for row in rows], dtype=numpy.int32)
+    sequence_labels = numpy.concatenate([numpy.full(totalExonCount[label], code, dtype=numpy.uint8)
+                                         for code, label in enumerate(('up', 'dn', 'bg'))])
+    for index in range(8):
+        filename = os.path.join(tempPath, f'sequence_region_{index}.npy')
+        numpy.save(filename, numpy.array([row[index].sequence for row in rows]))
+        sequence_paths.append(filename)
+    metadata = os.path.join(tempPath, 'sequence_metadata.npz')
+    numpy.savez(metadata, origins=sequence_origins, lengths=sequence_lengths, labels=sequence_labels)
+    run_outputs.extend(sequence_paths + [metadata])
+    sequence_arrays = [numpy.load(filename, mmap_mode='r', allow_pickle=False) for filename in sequence_paths]
+    region_data.clear()
+
+
 def countMotif(mc, ttName, ttMotif, motifs):
-    # AUDIT F1: each observation is binary or ineligible, never a hit multiplicity.
-    cdist = {label: {index: {} for index in range(8)} for label in ('up', 'dn', 'bg')}
-    for label in cdist:
-        for regions in region_data[label]:
-            for index, extracted in enumerate(regions):
-                values = binary_windows(extracted, motifs, wLen, sLen)
-                for locus, value in enumerate(values):
-                    cdist[label][index].setdefault(locus, []).append(value)
-    # AUDIT F4: retain event-level observations for downstream regional calibration.
+    # AUDIT R4: sparse intervals plus range differences make work proportional to hits.
+    cdist = {label: {} for label in ('up', 'dn', 'bg')}
+    padding = max(max_motif_width(pattern) for pattern in motifs) - 1
     for index, name in enumerate(REGION_NAMES):
-        filename = os.path.join(positionalPath, ttName + '.' + ttMotif + '.' + name + '.hits.tsv')
-        with open(filename, 'w') as handle:
-            positions = range(0, eLen if index in (0, 3, 4, 7) else iLen, sLen)
-            handle.write('event_id\tset\t' + '\t'.join(map(str, positions)) + '\n')
-            for label in ('up', 'dn', 'bg'):
-                for row, event in enumerate(event_sets[label]):
-                    values = [cdist[label][index][locus][row] for locus in range(len(cdist[label][index]))]
-                    handle.write(event.event_id + '\t' + label + '\t' +
-                                 '\t'.join('NA' if value is None else str(value) for value in values) + '\n')
+        is_exon = index in (0, 3, 4, 7)
+        length = eLen if is_exon else iLen
+        window = args.exon_window if is_exon else wLen
+        n_windows = max(0, (length - window) // sLen + 1)
+        origins = sequence_origins[:, index]
+        sizes = sequence_lengths[:, index]
+        first = numpy.maximum(0, (origins + sLen - 1) // sLen)
+        last = numpy.minimum(n_windows, (origins + sizes - window) // sLen + 1)
+        valid = first < last
+        elig_lo = numpy.where(valid, first * sLen, -1).astype(numpy.int32)
+        elig_hi = numpy.where(valid, (last - 1) * sLen + 1, -1).astype(numpy.int32)
+        eligible_diff = numpy.zeros((3, n_windows + 1), dtype=numpy.int32)
+        numpy.add.at(eligible_diff, (sequence_labels[valid], first[valid]), 1)
+        numpy.add.at(eligible_diff, (sequence_labels[valid], last[valid]), -1)
+        hit_diff = numpy.zeros_like(eligible_diff)
+        hit_events, hit_starts, hit_ends = [], [], []
+        for row, value in enumerate(sequence_arrays[index]):
+            origin = int(origins[row])
+            crop_lo = max(0, -padding - origin)
+            crop_hi = min(len(value), length + padding - origin)
+            sequence = str(value[crop_lo:crop_hi])
+            offset = origin + crop_lo
+            spans = sorted((a + offset, b + offset) for pattern in motifs
+                           for a, b in overlapping_hits(pattern, sequence)
+                           if a + offset < length and b + offset > 0)
+            merged_lo = merged_hi = -1
+            for start, end in spans:
+                hit_events.append(row)
+                hit_starts.append(start)
+                hit_ends.append(end)
+                lo = max(int(first[row]), (start - window) // sLen + 1)
+                hi = min(int(last[row]), (end - 1) // sLen + 1)
+                if lo >= hi:
+                    continue
+                if lo <= merged_hi:
+                    merged_hi = max(merged_hi, hi)
+                else:
+                    if merged_lo >= 0:
+                        hit_diff[sequence_labels[row], merged_lo] += 1
+                        hit_diff[sequence_labels[row], merged_hi] -= 1
+                    merged_lo, merged_hi = lo, hi
+            if merged_lo >= 0:
+                hit_diff[sequence_labels[row], merged_lo] += 1
+                hit_diff[sequence_labels[row], merged_hi] -= 1
+        positives = numpy.cumsum(hit_diff[:, :-1], axis=1)
+        eligible = numpy.cumsum(eligible_diff[:, :-1], axis=1)
+        for code, label in enumerate(('up', 'dn', 'bg')):
+            cdist[label][index] = {j: WindowCounts(int(positives[code, j]), int(eligible[code, j]), totalExonCount[label])
+                                   for j in range(n_windows)}
+        filename = os.path.join(positionalPath, ttName + '.' + ttMotif + '.' + name + '.hits.npz')
+        numpy.savez_compressed(filename, schema_version=numpy.int16(2),
+                               event_index=numpy.asarray(hit_events, dtype=numpy.int32),
+                               hit_start=numpy.asarray(hit_starts, dtype=numpy.int16),
+                               hit_end=numpy.asarray(hit_ends, dtype=numpy.int16),
+                               elig_lo=elig_lo, elig_hi=elig_hi, set_label=sequence_labels,
+                               window=numpy.int32(window), step=numpy.int32(sLen), region_length=numpy.int32(length))
         run_outputs.append(filename)
     return cdist
 
@@ -1034,11 +1099,11 @@ def printCountDist(cdist, tName, tMotif):
             handle.write('Region\tposition\tsum\teligible\tdensity\tvalues\n')
             for index, name in enumerate(REGION_NAMES):
                 for locus, values in cdist[label][index].items():
-                    eligible = [value for value in values if value is not None]
+                    # AUDIT R4: binary histogram replaces redundant dense text values.
                     density = binary_density(values)
-                    handle.write(f'{name}\t{locus * sLen}\t{sum(eligible)}\t{len(eligible)}\t' +
-                                 ('NA' if not numpy.isfinite(density) else str(density)) + '\t[' +
-                                 ','.join('NA' if value is None else str(value) for value in values) + ']\n')
+                    handle.write(f'{name}\t{locus * sLen}\t{values.hits}\t{values.eligible}\t' +
+                                 ('NA' if not numpy.isfinite(density) else str(density)) + '\t' +
+                                 f'0:{values.eligible-values.hits},1:{values.hits},NA:{values.total-values.eligible}\n')
         run_outputs.append(filename)
 
 def computePValues(cdist_one, cdist_two,
@@ -1054,6 +1119,7 @@ def computePValues(cdist_one, cdist_two,
         7: 'DownstreamExon_5prime'
     }
     rng = numpy.random.default_rng(stat_seed)
+    fisher_cache = {}
     reasons = {}
     globals().setdefault("stat_reasons", {})[id(test_p)] = reasons
 
@@ -1061,13 +1127,15 @@ def computePValues(cdist_one, cdist_two,
         test_p[zz] = {}
         for locus in range(len(cdist_one[zz])):
             # AUDIT F6: ineligible events leave both numerator and denominator.
-            first = [v for v in cdist_one[zz][locus] if v is not None]
-            second = [v for v in cdist_two[zz][locus] if v is not None]
-            if not first or not second:
+            one = cdist_one[zz][locus]
+            two = cdist_two[zz][locus]
+            if not one.eligible or not two.eligible:
                 test_p[zz][locus] = float('nan')
                 reasons[(zz, locus)] = 'no eligible events in one or both sets'
                 continue
             try:
+                if stat_method != 'fisher':
+                    first, second = one.observations(), two.observations()
                 if stat_method == 'mannwhitney_greater':
                     pvalue = float(stats.mannwhitneyu(first, second, alternative='greater')[1])
                 elif stat_method == 'brunnermunzel_greater':
@@ -1089,8 +1157,13 @@ def computePValues(cdist_one, cdist_two,
                     pvalue = (ge_count + 1.0) / (stat_permutations + 1.0)
                 else:
                     # AUDIT F1: Fisher uses eligible binary events, not motif occurrences.
-                    pvalue = float(stats.fisher_exact(binary_table(first, second),
-                                   alternative=args.fisher_alternative)[1])
+                    # AUDIT R4: repeated binary tables share an exact Fisher result.
+                    key = (one.hits, one.eligible, two.hits, two.eligible)
+                    if key not in fisher_cache:
+                        fisher_cache[key] = float(stats.fisher_exact(
+                            [[one.hits, one.eligible-one.hits], [two.hits, two.eligible-two.hits]],
+                            alternative=args.fisher_alternative)[1])
+                    pvalue = fisher_cache[key]
             except Exception as exc:
                 # AUDIT F14: statistical exceptions must retain diagnostic context.
                 raise RuntimeError(f'{stat_method}: {REGION_NAMES[zz]} window {locus * sLen}: {exc}') from exc
@@ -1184,6 +1257,10 @@ def minPvalueOut(exonType):
 def _build_worker_state():
     state = {}
     for key, value in globals().items():
+        # AUDIT R4: shared sequence arrays reopen read-only instead of being pickled.
+        if key in {'region_data', 'event_sets', 'sequence_arrays', 'sequence_origins',
+                   'sequence_lengths', 'sequence_labels', 'genome'}:
+            continue
         if key.startswith('__'):
             continue
         if callable(value):
@@ -1200,14 +1277,24 @@ def _build_worker_state():
 
 def _init_worker(state):
     globals().update(state)
+    global sequence_arrays, sequence_origins, sequence_lengths, sequence_labels
+    sequence_arrays = [numpy.load(filename, mmap_mode='r', allow_pickle=False) for filename in sequence_paths]
+    with numpy.load(os.path.join(tempPath, 'sequence_metadata.npz'), allow_pickle=False) as metadata:
+        sequence_origins = metadata['origins']
+        sequence_lengths = metadata['lengths']
+        sequence_labels = metadata['labels']
+    for array in (sequence_origins, sequence_lengths, sequence_labels):
+        array.flags.writeable = False
 
 
 def _make_individual_map_worker(line):
     global run_outputs
     run_outputs = []
+    wall_start, cpu_start = timeit.default_timer(), time.process_time()
     d = []
     makeIndividualMaps(d, line)
-    return (d[0] if d else None, run_outputs)
+    return (d[0] if d else None, run_outputs,
+            timeit.default_timer() - wall_start, time.process_time() - cpu_start)
 
 
 def maybe_plot_motif_map(mapname, maxPointValue, maxNegPval, drawPoints,
@@ -1268,26 +1355,39 @@ def run_individual_map_workers(lines):
     worker_count = min(args.workers, len(lines))
     if worker_count == 1:
         results = [_make_individual_map_worker(line) for line in lines]
-        run_outputs = saved_outputs + [path for _, paths in results for path in paths]
-        return [result for result, _ in results if result is not None]
-    try:
-        with multiprocessing.get_context("spawn").Pool(
-                processes=worker_count,
-                initializer=_init_worker,
-                initargs=(worker_state, )) as pool:
-            results = pool.map(_make_individual_map_worker, lines)
-    except PermissionError:
-        logging.warning(
-            "Multiprocessing pool unavailable; falling back to serial motif map generation"
-        )
-        _init_worker(worker_state)
-        results = [_make_individual_map_worker(line) for line in lines]
-    run_outputs = saved_outputs + [path for _, paths in results for path in paths]
-    return [result for result, _ in results if result is not None]
+    else:
+        try:
+            with multiprocessing.get_context("spawn").Pool(
+                    processes=worker_count,
+                    initializer=_init_worker,
+                    initargs=(worker_state, )) as pool:
+                results = pool.map(_make_individual_map_worker, lines)
+        except PermissionError:
+            logging.warning(
+                "Multiprocessing pool unavailable; falling back to serial motif map generation"
+            )
+            _init_worker(worker_state)
+            results = [_make_individual_map_worker(line) for line in lines]
+    # AUDIT R4: separate measured motif task cost from spawn/rendering overhead.
+    args.motif_task_wall_seconds = getattr(args, 'motif_task_wall_seconds', 0) + sum(item[2] for item in results)
+    args.motif_task_cpu_seconds = getattr(args, 'motif_task_cpu_seconds', 0) + sum(item[3] for item in results)
+    run_outputs = saved_outputs + [path for item in results for path in item[1]]
+    return [item[0] for item in results if item[0] is not None]
 
 
 def run_pipeline():
-    global genome, start, uNum, dNum, bNum, tHeader, event_sets, region_data, totalExonCount
+    global genome, start, uNum, dNum, bNum, tHeader, event_sets, region_data, totalExonCount, motif_padding
+    # AUDIT R4: validate maximum match width before any sequence extraction.
+    patterns = []
+    for motif_path in (args.knownMotifs, args.motif):
+        if motif_path != 'NA':
+            with open(motif_path) as handle:
+                next(handle)
+                patterns.extend(line.strip().split('\t')[1] for line in handle if line.strip())
+    motif_padding = max((max_motif_width(pattern) - 1 for pattern in patterns), default=0)
+    if max(iLen, eLen) + motif_padding > numpy.iinfo(numpy.int16).max:
+        raise ValueError('Region length plus motif overhang exceeds int16 positional coordinates')
+    extraction_start = timeit.default_timer()
     logging.debug("================================")
     logging.debug("GETTING GENOME FASTA OBJECT")
     genome = load_genome(args.genome, fasta_root_PATH)
@@ -1319,6 +1419,7 @@ def run_pipeline():
         getFasta('up')
         getFasta('dn')
         getFasta('bg')
+        prepare_sequence_store()
         for jj in ['up', 'dn', 'bg']:
             rg = region[0]
             fFile = open(fastaPath + '/' + jj + '.' + rg + '.fasta')
@@ -1346,6 +1447,7 @@ def run_pipeline():
         logging.debug("Detail: %s" % sys.exc_info()[1])
         sys.exit(-2)
     logging.debug("DONE MAKING FASTA FILES")
+    args.extraction_seconds = timeit.default_timer() - extraction_start
     logging.debug("================================")
 
 
@@ -1358,7 +1460,9 @@ def run_pipeline():
         tHeader = kFile.readline().strip()
 
         known_lines = [line for line in kFile]
+        motif_start = timeit.default_timer()
         d = run_individual_map_workers(known_lines)
+        args.motif_seconds = timeit.default_timer() - motif_start
 
         for i in range(len(d)):
 
@@ -1373,7 +1477,9 @@ def run_pipeline():
             tHeader = mFile.readline().strip()
 
             motif_lines = [line2 for line2 in mFile]
+            motif_start = timeit.default_timer()
             d2 = run_individual_map_workers(motif_lines)
+            args.motif_seconds += timeit.default_timer() - motif_start
 
             for i in range(len(d2)):
 
@@ -1405,6 +1511,10 @@ def run_pipeline():
     if args.motif != "NA":
         mFile.close()
 
+    # AUDIT R4: release Windows mmap handles before registered temporary cleanup.
+    for array in sequence_arrays:
+        array._mmap.close()
+
     logging.debug("Program ended")
     currentTime = time.time()
     runningTime = currentTime - startTime
@@ -1412,18 +1522,16 @@ def run_pipeline():
                   (runningTime / 3600,
                    (runningTime % 3600) / 60, runningTime % 60))
 
-    # AUDIT F7: old temporary cleanup is opt-in; do not recursively remove directories.
-    if args.delete_temp:
-        for filename in Path(tempPath).iterdir():
-            if filename.is_file():
-                filename.unlink()
-        if not any(Path(tempPath).iterdir()):
-            Path(tempPath).rmdir()
-    # AUDIT F8: hash the actual completed run, with effective statistical settings.
+    # AUDIT R2/R3: hash every registered summary input before deleting current temp files.
     logging.shutdown()
     parameters = dict(vars(args), stat_method=stat_method,
                       stat_permutations=stat_permutations, stat_seed=stat_seed)
-    write_run_manifest(outPath, [filename for filename in run_outputs if Path(filename).is_file()], parameters)
+    completed = [Path(filename) for filename in run_outputs]
+    temporary = [path for path in completed if path.resolve().parent == Path(tempPath).resolve()]
+    write_run_manifest(outPath, completed, parameters,
+                       delete_files=temporary if args.delete_temp else [])
+    if args.delete_temp and not any(Path(tempPath).iterdir()):
+        Path(tempPath).rmdir()
 
     sys.exit(0)
 

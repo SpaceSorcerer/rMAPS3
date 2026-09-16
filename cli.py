@@ -175,6 +175,9 @@ def motif_map_se(
         "--window",
         help="Window size for motif scanning.",
     ),
+    # AUDIT R1: unspecified exon width follows --window without changing its default.
+    exon_window: int | None = typer.Option(None, "--exon-window", min=1,
+        help="SE exon window width; defaults to --window (one window at exon=window=50)."),
     step: int = typer.Option(
         1,
         "--step",
@@ -202,9 +205,9 @@ def motif_map_se(
     stat_seed: int | None = STAT_SEED_OPTION,
     # AUDIT F7: SE positional tables are retained by default.
     keep_temp: bool = typer.Option(False, "--keep-temp", help="Compatibility option; SE temp is retained by default."),
-    delete_temp: bool = typer.Option(False, "--delete-temp", help="Delete SE temp tables after success; retain per-event hit matrices."),
+    delete_temp: bool = typer.Option(False, "--delete-temp", help="Delete registered SE temp tables after hashing; retain sparse positional hits."),
     # AUDIT F8: reuse of an existing output directory requires explicit consent.
-    overwrite: bool = typer.Option(False, "--overwrite", help="Allow an existing non-empty output directory."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Archive previous registered run outputs before reusing the directory."),
     # AUDIT F13: disjoint event sets are the default.
     allow_overlap: bool = typer.Option(False, "--allow-overlap", help="Allow and report events shared between input sets."),
     # AUDIT F15: expose the Fisher tail rather than fixing it internally.
@@ -244,6 +247,7 @@ def motif_map_se(
         allow_overlap=allow_overlap,
         fisher_alternative=fisher_alternative.value,
         workers=workers,
+        exon_window=exon_window,
     )
     raise typer.Exit(code=code)
 

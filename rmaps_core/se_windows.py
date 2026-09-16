@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import warnings
+from functools import lru_cache
 
 from rmaps_core.genome_access import fetch_seq
 
@@ -89,24 +90,58 @@ def read_event_sets(paths, genome, allow_overlap=False):
     return groups
 
 
-def overlapping_hits(pattern, sequence):
-    # AUDIT F9: explicit starts preserve overlaps, regex backreferences and each span.
+@lru_cache(maxsize=512)
+def _compiled_motif(pattern):
     pattern = pattern.replace("U", "T").replace("u", "t")
-    regex = re.compile(pattern, re.IGNORECASE)
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def max_motif_width(pattern):
+    # AUDIT R4: bounded extraction requires a finite, context-free match width.
+    regex = _compiled_motif(pattern)
+    parsed = re._parser.parse(regex.pattern, regex.flags)
+    def check(items):
+        for opcode, value in items:
+            if str(opcode) in {"ASSERT", "ASSERT_NOT", "AT"}:
+                raise ValueError("Bounded motif scans do not support anchors or lookarounds")
+            if str(opcode) == "SUBPATTERN":
+                check(value[-1])
+            elif str(opcode) == "BRANCH":
+                for branch in value[1]:
+                    check(branch)
+            elif str(opcode) in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
+                check(value[-1])
+            elif str(opcode) == "ATOMIC_GROUP":
+                check(value)
+            elif str(opcode) == "GROUPREF_EXISTS":
+                check(value[1])
+                if value[2] is not None:
+                    check(value[2])
+    check(parsed)
+    minimum, maximum = parsed.getwidth()
+    if minimum == 0 or maximum >= re._constants.MAXREPEAT:
+        raise ValueError(f"Motif requires a finite, positive match width: {pattern!r}")
+    return maximum
+
+
+def overlapping_hits(pattern, sequence):
+    # AUDIT R4: native search skips nonmatching starts; next start preserves overlaps.
+    regex = _compiled_motif(pattern)
     result = []
-    sequence = sequence.upper()
-    for position in range(len(sequence) + 1):
-        match = regex.match(sequence, position)
+    position = 0
+    while position <= len(sequence):
+        match = regex.search(sequence, position)
         if match is None:
-            continue
+            break
         start, end = match.span()
         if start == end:
             raise ValueError(f"Motif regex must not match an empty sequence: {pattern!r}")
         result.append((start, end))
+        position = start + 1
     return result
 
 
-def event_regions(genome, event, intron, exon):
+def event_regions(genome, event, intron, exon, padding=0):
     # AUDIT F6: true exon/intron boundaries and chromosome clipping define eligibility.
     if intron <= 0 or exon <= 0:
         raise ValueError("intron and exon lengths must be positive")
@@ -120,10 +155,20 @@ def event_regions(genome, event, intron, exon):
                 (event.second_start, event.second_end)]
     if event.strand == "-":
         features.reverse()
-    extracted = []
-    for start, end in features:
-        left = min(chromosome_length, max(0, start))
-        right = min(chromosome_length, max(0, end))
+    specs = ((0, exon, True), (1, intron, False), (1, intron, True),
+             (2, exon, False), (2, exon, True), (3, intron, False),
+             (3, intron, True), (4, exon, False))
+    result = []
+    for feature, length, end_anchored in specs:
+        start, end = features[feature]
+        feature_length = end - start
+        anchor = feature_length - length if end_anchored else 0
+        # AUDIT R4: fetch only the region plus finite motif overhang within its feature.
+        lo, hi = max(0, anchor - padding), min(feature_length, anchor + length + padding)
+        left, right = ((start + lo, start + hi) if event.strand == "+"
+                       else (end - hi, end - lo))
+        left = min(chromosome_length, max(0, left))
+        right = min(chromosome_length, max(0, right))
         try:
             sequence = fetch_seq(genome, event.strand, event.chrom, left, right)
         except Exception as exc:
@@ -131,14 +176,6 @@ def event_regions(genome, event, intron, exon):
         if len(sequence) != right - left:
             raise ValueError(f"event {event.event_id}: incomplete FASTA fetch [{left}, {right})")
         offset = left - start if event.strand == "+" else end - right
-        extracted.append((sequence, offset, end - start))
-    specs = ((0, exon, True), (1, intron, False), (1, intron, True),
-             (2, exon, False), (2, exon, True), (3, intron, False),
-             (3, intron, True), (4, exon, False))
-    result = []
-    for feature, length, end_anchored in specs:
-        sequence, offset, feature_length = extracted[feature]
-        anchor = feature_length - length if end_anchored else 0
         result.append(RegionSequence(sequence, offset - anchor, length))
     return result
 
@@ -146,7 +183,7 @@ def event_regions(genome, event, intron, exon):
 def binary_windows(region, patterns, window, step=1):
     """Window j covers [j, j+window) in transcript orientation in every region.
 
-    Start positions are range(0, region.length, step). A hit overlaps when any
+    Start positions are range(0, region.length-window+1, step). A hit overlaps when any
     nucleotide intersects the window. A window is eligible only when all its
     nucleotides belong to the event's feature and are present in the chromosome.
     End-anchored regions use j=0 at feature_end-region.length; other regions use
@@ -159,7 +196,8 @@ def binary_windows(region, patterns, window, step=1):
             for pattern in patterns for start, end in overlapping_hits(pattern, region.sequence)]
     # AUDIT F3: one half-open convention, independent of strand and motif length.
     result = []
-    for j in range(0, region.length, step):
+    # AUDIT R1: complete windows only, including one window when length == window.
+    for j in range(0, region.length - window + 1, step):
         if j < region.origin or j + window > region.origin + len(region.sequence):
             result.append(None)
         else:
@@ -180,5 +218,18 @@ def binary_table(first, second):
 
 def binary_density(values):
     # AUDIT F15: event proportion uses the same eligible binary observations as Fisher.
+    if isinstance(values, WindowCounts):
+        return values.hits / values.eligible if values.eligible else float("nan")
     eligible = [value for value in values if value is not None]
     return sum(eligible) / len(eligible) if eligible else float("nan")
+
+
+@dataclass(frozen=True)
+class WindowCounts:
+    # AUDIT R4: sufficient binary counts avoid n_events x n_windows Python objects.
+    hits: int
+    eligible: int
+    total: int
+
+    def observations(self):
+        return [1] * self.hits + [0] * (self.eligible - self.hits)

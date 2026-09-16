@@ -127,6 +127,7 @@ def run_motif_map(
     allow_overlap: bool = False,
     fisher_alternative: str = "greater",
     workers: int | None = None,
+    exon_window: int | None = None,
 ) -> int:
     """
     Build and run the legacy motifMap* script for a given event type.
@@ -197,6 +198,11 @@ def run_motif_map(
         if fisher_alternative not in ("greater", "two-sided"):
             raise ValueError("fisher_alternative must be greater or two-sided")
         cmd.extend(["--fisher-alternative", fisher_alternative])
+        # AUDIT R1: preserve W by default; permit a separate complete exon window.
+        if exon_window is not None:
+            if exon_window < 1:
+                raise ValueError("exon_window must be at least 1")
+            cmd.extend(["--exon-window", str(exon_window)])
         # AUDIT F20: bound SE concurrency, including single-CPU systems.
         workers = workers if workers is not None else min(4, max(1, (os.cpu_count() or 1) - 1))
         if workers < 1:
@@ -205,7 +211,8 @@ def run_motif_map(
         # AUDIT F13: cross-set overlap remains an explicit opt-in.
         if allow_overlap:
             cmd.append("--allow-overlap")
-        # AUDIT F8: prepared XLSX files are authorized by the parent preflight.
+        # AUDIT R8: parent preflight already archived any prior manifest once.
+        # Prepared XLSX and unowned files require the engine's reuse permission.
         if overwrite or rmats != original_rmats:
             cmd.append("--overwrite")
         # AUDIT F7: retain positional tables unless deletion is requested.
@@ -228,13 +235,17 @@ def run_motif_map(
     manifest = output / "run_manifest.json"
     if code == 0 and event.lower() == "se" and rmats != original_rmats and manifest.exists():
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-        files = [entry["path"] for entry in payload["outputs"]]
-        if Path(rmats).exists():
-            files.append(rmats)
+        # AUDIT R3: keep deleted summary-input hashes instead of trying to reopen them.
+        prepared = Path(rmats)
         parameters = payload["parameters"]
         parameters["original_rmats"] = original_rmats
         parameters["overwrite"] = overwrite
-        write_run_manifest(output, files, parameters)
+        write_run_manifest(output, [prepared], parameters,
+                           preserved_entries=payload["outputs"],
+                           delete_files=[prepared] if delete_temp else [])
+        temp = output / "temp"
+        if delete_temp and temp.exists() and not any(temp.iterdir()):
+            temp.rmdir()
 
     return code
 
