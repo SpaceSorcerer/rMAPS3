@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -218,7 +219,8 @@ def test_sparse_stream_crosses_compression_chunk_boundary(tmp_path):
     path = tmp_path / "chunked.hits.npz"
     indices = np.arange(count, dtype=np.int32)
     starts = (indices % 201).astype(np.int16)
-    np.savez_compressed(path, event_index=indices, hit_start=starts, hit_end=starts + 4)
+    np.savez_compressed(path, event_index=indices, hit_start=starts, hit_end=starts + 4,
+                        schema_version=2)
     observed_count = 0
     for expected_index, (event_index, lo, hi) in enumerate(iter_hits(path)):
         assert event_index == expected_index
@@ -227,19 +229,36 @@ def test_sparse_stream_crosses_compression_chunk_boundary(tmp_path):
     assert observed_count == count
 
 
+@pytest.mark.parametrize("reader_name", ["load_hits", "iter_hits"])
+def test_sparse_readers_reject_schema_one(tmp_path, reader_name):
+    # AUDIT S2: both public readers must reject a valid-looking old sparse schema.
+    from rmaps_core import positional_io
+    path = tmp_path / "schema_one.hits.npz"
+    np.savez_compressed(path, event_index=np.array([0], dtype=np.int32),
+                        hit_start=np.array([0], dtype=np.int16),
+                        hit_end=np.array([2], dtype=np.int16),
+                        elig_lo=np.array([0]), elig_hi=np.array([1]),
+                        set_label=np.array([0], dtype=np.uint8), window=4,
+                        step=1, region_length=4, schema_version=1)
+    with pytest.raises(ValueError, match=r"(?i)schema.*1.*2"):
+        result = getattr(positional_io, reader_name)(path)
+        if reader_name == "iter_hits":
+            list(result)
+
+
 MOTIFS = ("TEST.AA", "OTHER.ATAT")
 FASTA_REGIONS = ("UpstreamExon", "UpstreamExonIntron", "UpstreamIntron",
                  "TargetExon", "DownstreamIntron", "DownstreamExonIntron", "DownstreamExon")
 
 
-def expected_inventory():
+def expected_inventory(motifs=MOTIFS):
     # AUDIT R7: independent, exhaustive contract; never derive expected paths from manifest.
     paths = {"log.motifMap.txt", "pVal.up.vs.bg.RNAmap.txt", "pVal.dn.vs.bg.RNAmap.txt"}
     paths |= {f"exon/{label}.coord.txt" for label in ("up", "dn", "bg")}
     paths |= {f"fasta/{label}.{region}.fasta" for label in ("up", "dn", "bg") for region in FASTA_REGIONS}
     paths |= {f"temp/sequence_region_{index}.npy" for index in range(8)}
     paths.add("temp/sequence_metadata.npz")
-    for motif in MOTIFS:
+    for motif in motifs:
         paths |= {f"positional/{motif}.{region}.hits.npz" for region in REGION_NAMES}
         paths |= {f"temp/{motif}.countDist.{label}.txt" for label in ("up", "dn", "bg")}
         paths |= {f"temp/{motif}.pVal.{label}.vs.bg.txt" for label in ("up", "dn")}
@@ -327,7 +346,7 @@ def test_cli_every_pvalue_roots_alternative_and_na(cli_runs):
                             na_count += 1
                         else:
                             expected = fisher_exact(counts, alternative=alternative).pvalue
-                            assert float(row["fisher.exact.pVal"]) == pytest.approx(expected, abs=1e-14)
+                            assert float(row["fisher.exact.pVal"]) == pytest.approx(expected, abs=1e-14), "NPZ/pVal count mismatch"
                             assert row["reason"] == ""
                             values.append(expected)
                             observed_alternatives[alternative].append(float(row["fisher.exact.pVal"]))
@@ -343,6 +362,11 @@ def test_cli_sparse_schema_stream_and_parallel_agreement(cli_runs):
     from rmaps_core.positional_io import iter_hits, load_hits
     parallel = cli_runs["greater"][0]
     serial = cli_runs["two-sided"][0]
+    # AUDIT S3: actual motif-task PIDs distinguish multiprocessing from silent serial work.
+    parallel_manifest = json.loads((parallel / "run_manifest.json").read_text())
+    serial_manifest = json.loads((serial / "run_manifest.json").read_text())
+    assert len(set(parallel_manifest["parameters"]["worker_pids"])) >= 2
+    assert len(set(serial_manifest["parameters"]["worker_pids"])) == 1
     for motif in MOTIFS:
         for region in REGION_NAMES:
             name = f"{motif}.{region}.hits.npz"
@@ -383,6 +407,79 @@ def test_cli_manifest_matches_explicit_inventory(cli_runs):
             assert entry["status"] == "retained"
             assert artifact.stat().st_size == entry["size_bytes"]
             assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
+
+
+def test_cli_asymmetric_strands_preserve_all_region_assignments(cli_runs, tmp_path):
+    # AUDIT S3: the CLI must orient asymmetric introns on a genomic-minus event.
+    # chr2 is chr1's reverse complement; these are the same transcript sequence.
+    from rmaps_core.positional_io import load_hits
+    _, base = cli_runs["two-sided"]
+    up = write_set(tmp_path / "strands.tsv", [
+        ("chr1", "+", 1000, 1100, 500, 600, 1500, 1600),
+        ("chr2", "-", 3900, 4000, 3400, 3500, 4400, 4500),
+    ])
+    motifs = tmp_path / "strand_motifs.tsv"
+    motifs.write_text("Protein_name\tregularExpression\nTEST\tAA\nOTHER\tATAT\nDOWN\tGTGT\n",
+                      encoding="ascii")
+    output = tmp_path / "strand_out"
+    command = list(base)
+    for flag, value in (("--up", up), ("--known-motifs", motifs), ("--output", output)):
+        command[command.index(flag) + 1] = str(value)
+    run_cli(command)
+    # Hand-derived positive window starts from the planted bases, not engine helpers.
+    expected = {
+        "TEST.AA": ((), (), (), (2, 4, 6), (4, 6), (), (), ()),
+        "OTHER.ATAT": ((), (2, 4, 6, 8), (0, 2), (), (), (), (), (2, 4, 6)),
+        "DOWN.GTGT": ((), (), (), (), (), (2, 4, 6, 8), (0, 2), ()),
+    }
+    for motif, region_starts in expected.items():
+        for index, (region, positive_starts) in enumerate(zip(REGION_NAMES, region_starts)):
+            hits, eligible, labels = load_hits(output / "positional" / f"{motif}.{region}.hits.npz")
+            np.testing.assert_array_equal(labels, [0, 0, 1, 2])
+            starts = np.arange(0, (10 if index in (0, 3, 4, 7) else 20) - 4 + 1, 2)
+            for event_index in (0, 1):
+                assert eligible[event_index].all()
+                assert tuple(starts[hits[event_index]]) == positive_starts, (motif, region, event_index)
+
+
+def test_cli_pvalue_crosscheck_detects_corrupted_npz_count(cli_runs, tmp_path):
+    # AUDIT S3 / R5: corrupt one event's hit count while leaving pVal files unchanged.
+    output, command = cli_runs["greater"]
+    corrupted = tmp_path / "corrupted"
+    shutil.copytree(output, corrupted)
+    path = corrupted / "positional" / "TEST.AA.TargetExon_5prime.hits.npz"
+    with np.load(path, allow_pickle=False) as data:
+        payload = {key: data[key].copy() for key in data.files}
+    selected = payload["event_index"] == 0
+    assert selected.any()
+    for key in ("event_index", "hit_start", "hit_end"):
+        payload[key] = payload[key][~selected]
+    np.savez_compressed(path, **payload)
+    changed_runs = dict(cli_runs, greater=(corrupted, command))
+    with pytest.raises(AssertionError, match="NPZ/pVal count mismatch"):
+        test_cli_every_pvalue_roots_alternative_and_na(changed_runs)
+
+
+def test_cli_optional_motifs_manifest_inventory(cli_runs, tmp_path):
+    # AUDIT S3 / R7: the optional motif file must extend the complete output inventory.
+    _, base = cli_runs["two-sided"]
+    motifs = tmp_path / "optional.tsv"
+    motifs.write_text("Protein_name\tregularExpression\nOPTIONAL\tGTGT\n", encoding="ascii")
+    output = tmp_path / "optional_out"
+    command = list(base)
+    command[command.index("--motifs") + 1] = str(motifs)
+    command[command.index("--output") + 1] = str(output)
+    run_cli(command)
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    expected = expected_inventory(MOTIFS + ("OPTIONAL.GTGT",))
+    assert {entry["path"] for entry in manifest["outputs"]} == expected
+    assert {path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()} == expected | {"run_manifest.json"}
+    for entry in manifest["outputs"]:
+        artifact = output / entry["path"]
+        assert entry["status"] == "retained"
+        assert artifact.stat().st_size == entry["size_bytes"]
+        assert hashlib.sha256(artifact.read_bytes()).hexdigest() == entry["sha256"]
+    assert manifest["parameters"]["motif"] == str(motifs)
 
 
 def test_cli_delete_temp_preserves_unowned_and_hashes_summary_inputs(cli_runs, tmp_path):

@@ -5,8 +5,19 @@ from contextlib import ExitStack
 from zipfile import ZipFile
 
 
+# AUDIT S2: reject incompatible sparse archives before interpreting their fields.
+def _validate_schema(data):
+    if "schema_version" not in data:
+        raise ValueError("Unsupported sparse schema_version: missing; expected 2")
+    version = np.asarray(data["schema_version"])
+    if version.shape != () or version.dtype.kind not in "iu" or version.item() != 2:
+        raise ValueError(f"Unsupported sparse schema_version: {version!r}; expected 2")
+
+
 def iter_hits(path):
     # AUDIT R4: stream hit tuples without allocating an event-by-window matrix.
+    with np.load(path, allow_pickle=False) as data:
+        _validate_schema(data)
     with ExitStack() as stack:
         archive = stack.enter_context(ZipFile(path))
         streams, dtypes, sizes = [], [], []
@@ -34,6 +45,7 @@ def iter_hits(path):
 def load_hits(path):
     # AUDIT R1/R4: reconstruct only complete windows from interval overlaps.
     with np.load(path, allow_pickle=False) as data:
+        _validate_schema(data)
         window, step, length = (int(data[key]) for key in ("window", "step", "region_length"))
         positions = np.arange(0, length - window + 1, step)
         labels = data["set_label"].copy()

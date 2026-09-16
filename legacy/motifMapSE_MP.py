@@ -16,7 +16,7 @@ from rmaps_core.stat_utils import normalize_stat_method, pvalue_header_label
 from rmaps_core.se_windows import (REGION_NAMES, read_event_sets, event_regions,
                                    overlapping_hits, binary_windows, binary_table,
                                    binary_density, WindowCounts, max_motif_width)
-from rmaps_core.output_utils import ensure_output_directory, write_run_manifest
+from rmaps_core.output_utils import ensure_output_directory, write_run_manifest, se_output_targets
 
 DRAW_MOTIF_PLOTS = (
     os.environ.get("RMAPS_FORCE_MOTIF_FALLBACK") != "1"
@@ -211,7 +211,11 @@ def setup_runtime():
 
 
     outDir = args.output
-    ensure_output_directory(outDir, overwrite=args.overwrite)
+    # AUDIT S1: the wrapper preflights all targets once; direct engine calls do it here.
+    if os.environ.get('RMAPS_PREFLIGHT_OUTPUT') != str(Path(outDir).resolve()):
+        ensure_output_directory(outDir, overwrite=args.overwrite,
+                                target_paths=se_output_targets(args.knownMotifs, args.motif,
+                                                               args.rMATS, args.miso))
     run_outputs = []
     run_motif_ids = []
     outPath = os.path.abspath(outDir)
@@ -1275,8 +1279,10 @@ def _build_worker_state():
     return state
 
 
-def _init_worker(state):
+def _init_worker(state, first_task_barrier=None):
     globals().update(state)
+    global _first_task_barrier
+    _first_task_barrier = first_task_barrier
     global sequence_arrays, sequence_origins, sequence_lengths, sequence_labels
     sequence_arrays = [numpy.load(filename, mmap_mode='r', allow_pickle=False) for filename in sequence_paths]
     with numpy.load(os.path.join(tempPath, 'sequence_metadata.npz'), allow_pickle=False) as metadata:
@@ -1289,12 +1295,20 @@ def _init_worker(state):
 
 def _make_individual_map_worker(line):
     global run_outputs
+    # AUDIT S3: each allocated process must take a task before tiny tasks finish.
+    # This changes startup scheduling only, never motif computation or result order.
+    global _first_task_barrier
+    barrier = globals().get('_first_task_barrier')
+    if barrier is not None:
+        _first_task_barrier = None
+        barrier.wait(timeout=120)
     run_outputs = []
     wall_start, cpu_start = timeit.default_timer(), time.process_time()
     d = []
     makeIndividualMaps(d, line)
     return (d[0] if d else None, run_outputs,
-            timeit.default_timer() - wall_start, time.process_time() - cpu_start)
+            timeit.default_timer() - wall_start, time.process_time() - cpu_start,
+            os.getpid())  # AUDIT S3: record the process that actually ran this motif.
 
 
 def maybe_plot_motif_map(mapname, maxPointValue, maxNegPval, drawPoints,
@@ -1357,10 +1371,12 @@ def run_individual_map_workers(lines):
         results = [_make_individual_map_worker(line) for line in lines]
     else:
         try:
-            with multiprocessing.get_context("spawn").Pool(
+            context = multiprocessing.get_context("spawn")
+            first_task_barrier = context.Barrier(worker_count)  # AUDIT S3
+            with context.Pool(
                     processes=worker_count,
                     initializer=_init_worker,
-                    initargs=(worker_state, )) as pool:
+                    initargs=(worker_state, first_task_barrier)) as pool:
                 results = pool.map(_make_individual_map_worker, lines)
         except PermissionError:
             logging.warning(
@@ -1371,6 +1387,8 @@ def run_individual_map_workers(lines):
     # AUDIT R4: separate measured motif task cost from spawn/rendering overhead.
     args.motif_task_wall_seconds = getattr(args, 'motif_task_wall_seconds', 0) + sum(item[2] for item in results)
     args.motif_task_cpu_seconds = getattr(args, 'motif_task_cpu_seconds', 0) + sum(item[3] for item in results)
+    # AUDIT S3: telemetry only; preserve task scheduling and all numeric outputs.
+    args.worker_pids = sorted(set(getattr(args, 'worker_pids', [])) | {item[4] for item in results})
     run_outputs = saved_outputs + [path for item in results for path in item[1]]
     return [item[0] for item in results if item[0] is not None]
 

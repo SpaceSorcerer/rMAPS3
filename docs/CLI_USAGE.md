@@ -177,6 +177,7 @@ The eight region labels and junction-relative offsets corresponding to region po
 
 | NPZ field | Meaning |
 |---|---|
+| `schema_version` | Scalar integer `2`; both sparse readers reject missing or other versions before reading hits. |
 | `event_index` | int32 event row for each sparse hit |
 | `hit_start`, `hit_end` | int16 half-open hit spans in region coordinates; edge-overlapping hits may extend outside `[0,L)` |
 | `elig_lo`, `elig_hi` | Per-event first eligible start and last eligible start + 1; both -1 for no eligible windows |
@@ -194,9 +195,14 @@ The eight region labels and junction-relative offsets corresponding to region po
 - Root `pVal.{up,dn}.vs.bg.RNAmap.txt` filenames and nine-column order are unchanged. Values
   remain **uncalibrated raw regional minima**. The engine does not implement F4 calibration;
   downstream selection-aware calibration must precede BH across these minima.
-- Non-empty output directories, including any previous `run_manifest.json`, require
-  `--overwrite`. Previous retained registered outputs and the previous manifest move into
-  `_previous_<UTC timestamp>/`; unowned files remain. Only current outputs enter summaries.
+<!-- AUDIT S1/S2/S3: ownership, sparse version, and actual worker provenance. -->
+- Non-empty output directories require `--overwrite` and an existing `run_manifest.json`.
+  Without a manifest, ownership is unknown and reuse is refused. Any unregistered path
+  colliding with a planned output aborts before writing or archiving. Previous retained
+  registered outputs and the previous manifest move into `_previous_<UTC timestamp>/`;
+  unrelated unowned files remain. Only current outputs enter summaries.
+- `run_manifest.json` parameters include `worker_pids`, the distinct process IDs that
+  actually executed motif tasks (including the parent PID if serial execution was used).
 - `run_manifest.json` has `schema_version: 2`. Each registered output has `path`, `sha256`,
   `size_bytes`, and `status` (`retained` or `deleted`). Deleted summary inputs remain in the
   inventory with their original hashes. Effective parameters, Python/package versions, git

@@ -13,7 +13,7 @@ import json
 from rmaps_core.input_utils import maybe_prepare_rmats_input
 from rmaps_core.path_utils import build_subprocess_env, repo_root, resolve_user_path
 from rmaps_core.stat_utils import normalize_stat_method
-from rmaps_core.output_utils import ensure_output_directory, write_run_manifest
+from rmaps_core.output_utils import ensure_output_directory, write_run_manifest, se_output_targets
 
 
 PYTHON = sys.executable
@@ -149,7 +149,9 @@ def run_motif_map(
     background = resolve_user_path(background, base_cwd)
     # AUDIT F8: reject reuse before XLSX preparation can modify an existing run.
     if event.lower() == "se":
-        ensure_output_directory(output, overwrite=overwrite)
+        # AUDIT S1: include engine and XLSX targets before archival or conversion.
+        ensure_output_directory(output, overwrite=overwrite,
+                                target_paths=se_output_targets(known_motifs, motifs, rmats, miso))
     original_rmats = rmats
     rmats = maybe_prepare_rmats_input(rmats, output)
     cmd: list[str] = [
@@ -220,6 +222,9 @@ def run_motif_map(
             cmd.append("--delete-temp")
 
     env_overrides = {"RMAPS_STAT_METHOD": stat_method}
+    if event.lower() == "se":
+        # AUDIT S1: the engine must not archive/refuse this already checked run again.
+        env_overrides["RMAPS_PREFLIGHT_OUTPUT"] = str(output.resolve())
     if stat_permutations is not None:
         env_overrides["RMAPS_STAT_PERMUTATIONS"] = str(stat_permutations)
     if stat_seed is not None:
