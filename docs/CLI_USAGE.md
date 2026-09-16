@@ -75,12 +75,17 @@ python cli.py motif-map mxe --help
   - Allowed values: `fisher`, `mannwhitney_greater`, `brunnermunzel_greater`, `permutation_one_sided`
 - `--stat-permutations` / `--statPermutations` (optional; permutation count for `permutation_one_sided`)
 - `--stat-seed` / `--statSeed` (optional; RNG seed for `permutation_one_sided`)
-- `--keep-temp` (keep `output/temp` after success; by default temp is cleaned on success and kept on failures)
+- `--keep-temp` (SE retains positional tables by default; other event types retain the previous opt-in behavior)
+- SE only: `--delete-temp` (delete regular files directly inside `output/temp` after success, then remove that directory if empty; preserve `positional/*.hits.tsv`)
+- SE only: `--overwrite` (allow an existing non-empty output directory)
+- SE only: `--allow-overlap` (allow identical events across up/down/background sets; duplicates within a set remain errors)
+- SE only: `--fisher-alternative greater|two-sided` (default `greater`)
+- SE only: `--workers N` (positive integer; default `max(1, min(4, cpu_count - 1))`)
 - `--separate`
 
 ### Statistical Methods
 
-- `fisher` (default): one-sided Fisher exact test on motif-count contingency tables.
+- `fisher` (default): for SE, Fisher exact test on binary events-with-hit versus events-without-hit; see the SE contract below. Other event engines retain their previous counting behavior.
 - `mannwhitney_greater`: one-sided Mann-Whitney U test on per-position motif count distributions.
 - `brunnermunzel_greater`: one-sided Brunner-Munzel test for stochastic dominance with weaker equal-variance assumptions.
 - `permutation_one_sided`: one-sided empirical permutation test on mean differences.
@@ -95,6 +100,76 @@ Permutation guidance:
 
 #### `se` (Skipped Exon)
 Use when your input file contains cassette-exon skipping events.
+
+<!-- AUDIT F1, F3, F5, F6, F7, F8, F9, F13, F14, F15, F20: SE numerical and output contract. -->
+SE coordinate replay requires a header and exactly eight tab-separated columns:
+
+```text
+chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd
+```
+
+The displayed spaces must be tabs in the file. Coordinates use zero-based starts and exclusive ends;
+`firstExon` is the genomic-left exon and `secondExon` the genomic-right exon on both strands.
+Coordinates must be integers, each start must precede its end, and strand must be `+` or `-`.
+Each set must be non-empty, chromosomes must exist in the FASTA, and duplicate events are rejected.
+Counts and between-set overlaps are reported; overlaps fail unless `--allow-overlap` is explicit.
+For human GRCh38/hg38, use `--fasta-root E:\references\rmaps_genomes --genome hg38`, which
+loads `E:\references\rmaps_genomes\hg38\hg38.fa`. FASTA keys use the first header token
+(`>chr1 1` therefore has key `chr1`). Missing chromosomes or fetch failures are hard errors.
+
+**Windows, eligibility, and matching**
+
+- Every region uses transcript orientation. A window of length `W` starting at region position
+  `j` covers `[j, j+W)`; `--step` selects window starts. A motif overlaps when at least one of
+  its nucleotides lies inside that interval. Both strands use this same definition.
+- Intronic sequence stops at the neighboring exons; genomic sequence stops at chromosome
+  boundaries. An event contributes only when it supplies the entire window. A short intron,
+  short exon, or chromosome edge can therefore remove it from that window's denominator.
+- Each eligible event contributes exactly `1` if any motif hit overlaps the window, otherwise
+  `0`. Fisher's table is `[[up_with, up_without], [bg_with, bg_without]]` (likewise down).
+  Density is events-with-hit divided by eligible events, hence lies in `[0,1]`.
+- Motifs are regular expressions, matched against uppercase DNA after converting `U` to `T`
+  in the pattern. Overlapping matches are retained, and every hit retains its own span.
+  IUPAC bracket classes such as `[AG]` are already regex-compatible; bare ambiguity letters
+  are not automatically expanded. Motif species provenance remains the user's responsibility.
+- The engine scans complete true exon/intron features so regex hits can extend beyond the
+  requested windows. Very long introns can therefore increase runtime and memory use.
+- Statistical errors raise or produce explicit unavailable (`NA`) results with a reason;
+  an unusable comparison is never silently replaced by `p=1`.
+
+The eight region labels and junction-relative offsets corresponding to region position `j` are:
+
+| Region | Offset |
+|---|---|
+| `UpstreamExon_3prime` | `-exon + j` |
+| `UpstreamExonIntron` | `j` |
+| `UpstreamIntron` | `-intron + j` |
+| `TargetExon_5prime` | `j` |
+| `TargetExon-3prime` | `-exon + j` |
+| `DownstreamIntron` | `j` |
+| `DownstreamExonIntron` | `-intron + j` |
+| `DownstreamExon_5prime` | `j` |
+
+**Retained output and downstream calibration**
+
+- Per-motif positional p-values and count distributions in `temp/` are preserved by default.
+  `--delete-temp` removes regular files directly in `temp/` after success, including older
+  files when `--overwrite` is used, and removes the directory if empty. It leaves nested
+  directories intact.
+- `positional/<RBP>.<motif>.<region>.hits.tsv` contains one row per event, grouped as `up`,
+  `dn`, then `bg`, retaining input order within each set. Event identifiers and the `set`
+  column identify rows; numeric column headers are region-relative window starts. Values
+  are `0`, `1`, or literal `NA` for an ineligible event/window. These matrices are retained
+  even with `--delete-temp` and provide the binary observations and missingness required
+  by a downstream region-minimum calibrator.
+- Root `pVal.{up,dn}.vs.bg.RNAmap.txt` values remain **uncalibrated raw regional minima**.
+  The engine does not implement F4 calibration. Applying BH directly to these minima does
+  not correct selection across windows; downstream calibration must precede that step.
+- Non-empty output directories are refused unless `--overwrite` is supplied. Summaries
+  use only results generated in the current run, including when older files remain.
+- `run_manifest.json` records relative output paths, SHA256 hashes, byte sizes, effective
+  parameters, statistical method, permutations, seed, Python/package versions, and git revision.
+  It inventories retained current-run outputs; the manifest excludes its own hash.
 
 ```bash
 python cli.py motif-map se \

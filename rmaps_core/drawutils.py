@@ -3,6 +3,7 @@ import re
 import shutil
 import csv
 import atexit
+import math
 
 from pyx import *
 
@@ -491,11 +492,16 @@ def export_motif_map_fallback(event_type,
         if len(series) < 2:
             return []
         denom = max(1, len(series) - 1)
-        points = []
+        # AUDIT F15: unavailable density/p-value positions are gaps, never peaks.
+        segments = [[]]
         for index, values in enumerate(series):
+            if not math.isfinite(values[series_index]):
+                if segments[-1]:
+                    segments.append([])
+                continue
             x = x0 + int((index / float(denom)) * (x1 - x0))
-            points.append((x, y_from_value(values[series_index], max_value, y0, y1)))
-        return points
+            segments[-1].append((x, y_from_value(values[series_index], max_value, y0, y1)))
+        return segments
 
     for region_index, region_points in enumerate(draw_points):
         x0 = left + region_index * (panel_width + gap)
@@ -511,8 +517,9 @@ def export_motif_map_fallback(event_type,
             points = series_points(region_points, series_index, x0, x1,
                                    score_top + 8, score_bottom - 8,
                                    max_point_value)
-            if len(points) >= 2:
-                draw.line(points, fill=colors[name], width=2)
+            for segment in points:
+                if len(segment) >= 2:
+                    draw.line(segment, fill=colors[name], width=2)
 
         if region_index < len(neg_pval_points):
             pval_region = neg_pval_points[region_index]
@@ -520,8 +527,9 @@ def export_motif_map_fallback(event_type,
                 points = series_points(pval_region, series_index, x0, x1,
                                        pval_top + 8, pval_bottom - 8,
                                        max_neg_pval)
-                if len(points) >= 2:
-                    draw.line(points, fill=colors[name], width=1)
+                for segment in points:
+                    if len(segment) >= 2:
+                        draw.line(segment, fill=colors[name], width=1)
 
     png_ok = False
     pdf_ok = False

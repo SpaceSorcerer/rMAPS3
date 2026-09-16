@@ -1,4 +1,4 @@
-﻿from pyx import *
+from pyx import *
 import re, os, sys, logging, time, argparse, numpy, subprocess, shutil
 import glob
 import operator
@@ -8,10 +8,15 @@ import timeit
 import multiprocessing
 import pickle
 import types
+from pathlib import Path
 
 from rmaps_core import drawutils
 from rmaps_core.genome_access import load_genome, fetch_seq as fetch_seq_from_fasta
 from rmaps_core.stat_utils import normalize_stat_method, pvalue_header_label
+from rmaps_core.se_windows import (REGION_NAMES, read_event_sets, event_regions,
+                                   overlapping_hits, binary_windows, binary_table,
+                                   binary_density)
+from rmaps_core.output_utils import ensure_output_directory, write_run_manifest
 
 DRAW_MOTIF_PLOTS = (
     os.environ.get("RMAPS_FORCE_MOTIF_FALLBACK") != "1"
@@ -99,13 +104,14 @@ def setup_runtime():
                         help='an miso output file from SE event')
     start = timeit.default_timer()
 
+    # AUDIT F13: advertise exactly the schema enforced by the coordinate validator.
     parser.add_argument(
         '-u',
         '--up',
         dest='up',
         required=True,
         help=
-        'a tab delimited file containing upregulated exons with the following headers. GeneID geneSymbol chr strand exonStart_0base exonEnd upstreamES upstreamEE downstreamES downstreamEE'
+        'Eight tab-separated columns with header: chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd'
     )
     parser.add_argument(
         '-d',
@@ -113,7 +119,7 @@ def setup_runtime():
         dest='dn',
         required=True,
         help=
-        'a tab delimited file containing downregulated exons with the following headers. GeneIDgene Symbol chr strand exonStart_0base exonEnd upstreamES upstreamEE downstreamES downstreamEE'
+        'Eight tab-separated columns with header: chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd'
     )
     parser.add_argument(
         '-b',
@@ -121,7 +127,7 @@ def setup_runtime():
         dest='bg',
         required=True,
         help=
-        'a tab delimited file containing background exons with the following headers. GeneID geneSymbol chr strand exonStart_0base exonEnd upstreamES upstreamEE downstreamES downstreamEE'
+        'Eight tab-separated columns with header: chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd'
     )
     parser.add_argument('--label',
                         type=str,
@@ -169,7 +175,19 @@ def setup_runtime():
                         default=False,
                         action='store_const',
                         const=True)
+    # AUDIT F13: cross-set overlap requires explicit acknowledgement.
+    parser.add_argument('--allow-overlap', action='store_true')
+    # AUDIT F1: retain directional Fisher by default; expose two-sided testing.
+    parser.add_argument('--fisher-alternative', choices=['greater', 'two-sided'], default='greater')
+    # AUDIT F20: bound automatic concurrency and permit explicit allocation.
+    parser.add_argument('--workers', type=int, default=max(1, min(4, multiprocessing.cpu_count() - 1)))
+    # AUDIT F7: positional scientific outputs are preserved by default.
+    parser.add_argument('--delete-temp', action='store_true')
+    # AUDIT F8: existing outputs require explicit reuse authorization.
+    parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    if any(value <= 0 for value in (args.intron, args.exon, args.window, args.step, args.workers)):
+        parser.error('intron, exon, window, step and workers must be positive')
     stat_method = normalize_stat_method(os.environ.get('RMAPS_STAT_METHOD', 'fisher'))
     try:
         stat_permutations = max(50, int(os.environ.get('RMAPS_STAT_PERMUTATIONS', '500')))
@@ -189,7 +207,9 @@ def setup_runtime():
 
 
     outDir = args.output
-    os.makedirs(outDir, exist_ok=True)
+    ensure_output_directory(outDir, overwrite=args.overwrite)
+    run_outputs = []
+    run_motif_ids = []
     outPath = os.path.abspath(outDir)
     exonDir = args.output + '/exon'
     os.makedirs(exonDir, exist_ok=True)
@@ -203,6 +223,8 @@ def setup_runtime():
     tempDir = args.output + '/temp'
     os.makedirs(tempDir, exist_ok=True)
     tempPath = os.path.abspath(tempDir)
+    positionalPath = os.path.join(os.path.abspath(outDir), 'positional')
+    os.makedirs(positionalPath, exist_ok=True)
     scriptPath = os.path.abspath(os.path.dirname(__file__))
     binPath = os.path.abspath(os.path.join(scriptPath, '..', 'bin'))
 
@@ -214,6 +236,7 @@ def setup_runtime():
         filemode='w')
 
     logging.debug('Start the program with [%s]\n', listToString(sys.argv))
+    run_outputs.append(os.path.join(outPath, 'log.motifMap.txt'))
     startTime = time.time()
     logging.debug('motifTools version: %s', VER)
 
@@ -279,6 +302,7 @@ def setup_runtime():
             logging.debug("error detail: %s" % output)
             sys.exit(-101)
         logging.debug(output)
+        run_outputs.append(rMATS)
 
 
 
@@ -435,53 +459,22 @@ def makeInputFiles(
     logging.debug("Done making input file from rMATS")
 
 
-def getFasta(t):  ## get fasta for the given exon group
-
-    logging.debug("Making fasta files for: %s" % t)
-    tFile = []
-    for rg in region:  ## region name
-        tFile.append(open(fastaPath + '/' + t + '.' + rg + '.fasta', 'w'))
-
-    f = open(exonPath + '/' + t + '.coord.txt')
-    header = f.readline()
-    for line in f:  ## process each event
-        r = []
-        ele = line.strip().split('\t')
-        chr = ele[0]
-        strand = '+'
-        r1 = [int(ele[4]), int(ele[5])]
-        r2 = [int(ele[5]), int(ele[5]) + iLen + wLen]
-        r3 = [int(ele[2]) - iLen - wLen, int(ele[2])]
-        r4 = [int(ele[2]), int(ele[3])]
-        r5 = [int(ele[3]), int(ele[3]) + iLen + wLen]
-        r6 = [int(ele[6]) - iLen - wLen, int(ele[6])]
-        r7 = [int(ele[6]), int(ele[7])]
-
-        if ele[1] == '-' or ele[1] == '-1':  ## negative strand
-            r7 = [int(ele[4]), int(ele[5])]
-            r6 = [int(ele[5]), int(ele[5]) + iLen + wLen]
-            r5 = [int(ele[2]) - iLen - wLen, int(ele[2])]
-            r4 = [int(ele[2]), int(ele[3])]
-            r3 = [int(ele[3]), int(ele[3]) + iLen + wLen]
-            r2 = [int(ele[6]) - iLen - wLen, int(ele[6])]
-            r1 = [int(ele[6]), int(ele[7])]
-            strand = '-'
-
-        r = [r1, r2, r3, r4, r5, r6, r7]
-        fastaID = '>' + ':'.join(ele)
-
-        for i in range(len(r)):  ### start writing each region
-            fastaSeq = fetch_seq(genome, strand, chr, r[i][0], r[i][1])
-            tFile[i].write(fastaID + '\n' + fastaSeq + '\n')
-
-
-    logging.debug("Done making fasta files for: %s" % t)
+def getFasta(t):
+    # AUDIT F6: use true features, clipping chromosome edges before orientation.
+    region_data[t] = [event_regions(genome, event, iLen, eLen) for event in event_sets[t]]
+    feature_indices = (0, 1, 2, 3, 5, 6, 7)
+    for rg, index in zip(region, feature_indices):
+        filename = os.path.join(fastaPath, t + '.' + rg + '.fasta')
+        with open(filename, 'w') as handle:
+            for event, regions in zip(event_sets[t], region_data[t]):
+                handle.write('>' + event.event_id + '\n' + regions[index].sequence + '\n')
+        run_outputs.append(filename)
 
 
 def findAll(re_motif, s_seq):
-    return [[m.start(0), m.end(0)] for m in re.finditer(re_motif, s_seq)
-            ], [m.start(0) for m in re.finditer(re_motif, s_seq)]
-
+    # AUDIT F9: preserve overlapping matches and each individual span.
+    hits = overlapping_hits(re_motif, s_seq)
+    return [list(hit) for hit in hits], [start for start, _ in hits]
 
 def initMotif(mF, mc):  ## initialize motif counts
 
@@ -494,117 +487,28 @@ def initMotif(mF, mc):  ## initialize motif counts
     return motifs
 
 
-def countMotif(mc, ttName, ttMotif,
-               motifs):  ## counting motifs, motif name, motif reg expression
-    global totalExonCount
-    global uNum, dNum, bNum
-    global nu, nd, nb
-    global iLen, eLen, wLen, sLen, region
-
-    cdist = {'up': {}, 'dn': {}, 'bg': {}}
-    eP = eLen // sLen
-    iP = iLen // sLen
-
-    for kkkk in ['up', 'dn', 'bg']:
-        for iiii in range(8):
-            cdist[kkkk][iiii] = {}
-
-    for kkkk in ['up', 'dn', 'bg']:
-        for epep in range(eP):  ## for 0,3,4,7
-            for epindex in [0, 3, 4, 7]:  ## that has eP points
-                cdist[kkkk][epindex][epep] = [0] * totalExonCount[kkkk]
-        for ipip in range(iP):  ## for 1,2,5,6
-            for ipindex in [1, 2, 5, 6]:  ## that has iP points
-                cdist[kkkk][ipindex][ipip] = [0] * totalExonCount[kkkk]
-
-    tempPosition = []
-    for jj in ['up', 'dn', 'bg']:
-        for rg in region:
-            fFile = open(fastaPath + '/' + jj + '.' + rg + '.fasta')
-            exonNum = 0
-            for dummy in fFile:
-                seq = next(fFile).strip()
-                seqLen = len(seq)
-                for mm in motifs:
-                    dd, cc = findAll(mm, seq)
-                    if len(cc) > 0:  ## mapped somewhere
-                        mLen = dd[0][1] - dd[0][0]
-                        for pInd in cc:  ## index
-                            nInd = pInd + mLen - 1 - seqLen
-
-                            if pInd >= (max(iLen, eLen) + wLen) or nInd < -(
-                                    max(iLen, eLen) + wLen
-                            ):  ## index out of range, due to the exon body
-                                continue
-                            else:  ## incread count for both mc and countdist
-
-                                enInd = nInd + eLen + wLen - 1
-                                inInd = nInd + iLen + wLen - 1
-                                if rg == "UpstreamExon":  ## do it negative way
-                                    if nInd < (-eLen - wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, enInd - wLen + 1) // sLen,
-                                        min(eP, enInd // sLen + 1))
-                                    for tptp in tempPosition:
-                                        cdist[jj][0][tptp][exonNum] += 1
-                                elif rg == "UpstreamExonIntron":  ### do it positive way
-                                    if pInd >= (iLen + wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, pInd - wLen + 1) // sLen,
-                                        min(iP, pInd // sLen) - 1)
-                                    for tptp in tempPosition:
-                                        cdist[jj][1][tptp][exonNum] += 1
-                                elif rg == "UpstreamIntron":  ## do it negative way
-                                    if nInd < (-iLen - wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, inInd - wLen + 1) // sLen,
-                                        min(iP, inInd // sLen + 1))
-                                    for tptp in tempPosition:
-                                        cdist[jj][2][tptp][exonNum] += 1
-                                elif rg == "TargetExon":  ### do it both ways
-                                    if (pInd < (eLen + wLen)):  ## valid
-                                        tempPosition = range(
-                                            max(0, pInd - wLen + 1) // sLen,
-                                            min(eP, pInd // sLen) - 1)
-                                        for tptp in tempPosition:
-                                            cdist[jj][3][tptp][exonNum] += 1
-                                    if nInd >= (-eLen - wLen):  ## valid
-                                        tempPosition = range(
-                                            max(0, enInd - wLen + 1) // sLen,
-                                            min(eP, enInd // sLen + 1))
-                                        for tptp in tempPosition:
-                                            cdist[jj][4][tptp][exonNum] += 1
-                                elif rg == "DownstreamIntron":  ### do it positive way
-                                    if pInd >= (iLen + wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, pInd - wLen + 1) // sLen,
-                                        min(iP, pInd // sLen) - 1)
-                                    for tptp in tempPosition:
-                                        cdist[jj][5][tptp][exonNum] += 1
-                                elif rg == "DownstreamExonIntron":  ## do it negative way
-                                    if nInd < (-iLen - wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, inInd - wLen + 1) // sLen,
-                                        min(iP, inInd // sLen + 1))
-                                    for tptp in tempPosition:
-                                        cdist[jj][6][tptp][exonNum] += 1
-                                elif rg == "DownstreamExon":  ### do it positive way
-                                    if pInd >= (eLen + wLen):
-                                        continue
-                                    tempPosition = range(
-                                        max(0, pInd - wLen + 1) // sLen,
-                                        min(eP, pInd // sLen) - 1)
-                                    for tptp in tempPosition:
-                                        cdist[jj][7][tptp][exonNum] += 1
-                exonNum += 1
-            fFile.close()
+def countMotif(mc, ttName, ttMotif, motifs):
+    # AUDIT F1: each observation is binary or ineligible, never a hit multiplicity.
+    cdist = {label: {index: {} for index in range(8)} for label in ('up', 'dn', 'bg')}
+    for label in cdist:
+        for regions in region_data[label]:
+            for index, extracted in enumerate(regions):
+                values = binary_windows(extracted, motifs, wLen, sLen)
+                for locus, value in enumerate(values):
+                    cdist[label][index].setdefault(locus, []).append(value)
+    # AUDIT F4: retain event-level observations for downstream regional calibration.
+    for index, name in enumerate(REGION_NAMES):
+        filename = os.path.join(positionalPath, ttName + '.' + ttMotif + '.' + name + '.hits.tsv')
+        with open(filename, 'w') as handle:
+            positions = range(0, eLen if index in (0, 3, 4, 7) else iLen, sLen)
+            handle.write('event_id\tset\t' + '\t'.join(map(str, positions)) + '\n')
+            for label in ('up', 'dn', 'bg'):
+                for row, event in enumerate(event_sets[label]):
+                    values = [cdist[label][index][locus][row] for locus in range(len(cdist[label][index]))]
+                    handle.write(event.event_id + '\t' + label + '\t' +
+                                 '\t'.join('NA' if value is None else str(value) for value in values) + '\n')
+        run_outputs.append(filename)
     return cdist
-
 
 def drawNode(c, eH, eW, iW, indent, gap, sGap, scale):  ## draw node
 
@@ -895,11 +799,16 @@ def plotRegions(
 
 
 def fillUpPath(tPoints):
-    rPath = path.path(path.moveto(tPoints[0][0], tPoints[0][1]))
-    for pp in range(1, len(tPoints)):  ## for each point from the 2nd element
-        rPath.append(path.lineto(tPoints[pp][0], tPoints[pp][1]))
+    # AUDIT F15: unavailable windows form gaps, not fabricated density values.
+    rPath = path.path()
+    connected = False
+    for x, y in tPoints:
+        if not numpy.isfinite(x) or not numpy.isfinite(y):
+            connected = False
+            continue
+        rPath.append(path.lineto(x, y) if connected else path.moveto(x, y))
+        connected = True
     return rPath
-    logging.debug("Done fillUpPath function")
 
 
 def drawAcutalPlot(
@@ -1018,22 +927,20 @@ def countPerWindow(cpw, ic, sign, rLen):
 
 
 def ccc(ic):
-    global iLen, eLen, wLen, sLen, region
-    eP = eLen // sLen
-    iP = iLen // sLen
-    rVal = {}
-    rVal[0] = [0] * eP
-    rVal[1] = [0] * iP
-    rVal[2] = [0] * iP
-    rVal[3] = [0] * eP
-    rVal[4] = [0] * eP
-    rVal[5] = [0] * iP
-    rVal[6] = [0] * iP
-    rVal[7] = [0] * eP
-    for i in range(8):
-        for k in range(len(rVal[i])):
-            rVal[i][k] += sum(ic[i][k])
-    return rVal
+    # AUDIT F15: density is the proportion of eligible events, without a cap.
+    return {index: [binary_density(ic[index][locus]) for locus in range(len(ic[index]))]
+            for index in range(8)}
+
+def _plot_snapshot(paths):
+    return {path: (os.stat(path).st_mtime_ns, os.stat(path).st_size)
+            if os.path.isfile(path) else None for path in paths}
+
+
+def _record_plot_writes(before):
+    # AUDIT F8: stale plots from overwritten runs must not enter this manifest.
+    after = _plot_snapshot(before)
+    run_outputs.extend(path for path, status in after.items()
+                       if status is not None and status != before[path])
 
 
 def plotMotifs_finale(mapName,
@@ -1064,8 +971,10 @@ def plotMotifs_finale(mapName,
     safe_map_name = re.sub(r'[^A-Za-z0-9._-]+', '_', mapName)
     pdf_path = mapsPath + '/' + 'SE.' + safe_map_name + '.pdf'
     png_path = mapsPath + '/' + safe_map_name + '.png'
+    before = _plot_snapshot((pdf_path, png_path))
     pdf_ok, png_ok = drawutils.export_canvas_outputs(
         canv, pdf_path, png_path, png_resolution=100, logger=logging)
+    _record_plot_writes(before)
     if not pdf_ok:
         logging.debug("PDF export failed for %s", mapName)
     if not png_ok:
@@ -1089,9 +998,6 @@ def plotMotifs(
     negPvalPoints = []
     maxPointValue = 0.0000000000000000000000000000000000000000000000000001
     maxNegPval = 0.00000000000000000000000000000000000000000000000000000000000000001
-    up_den = float(max(1, uNum * len(motifs)))
-    dn_den = float(max(1, dNum * len(motifs)))
-    bg_den = float(max(1, bNum * len(motifs)))
     for zz in range(8):  ## for 8 regions
         drawPoints.append([])
         negPvalPoints.append([])
@@ -1099,12 +1005,14 @@ def plotMotifs(
                 len(upc[zz])
         ):  ## everything has the same items. It's okay to use this.
             drawPoints[zz].append([
-                min(1.0, float(upc[zz][ind]) / up_den),
-                min(1.0, float(dnc[zz][ind]) / dn_den),
-                min(1.0, float(bgc[zz][ind]) / bg_den)
+                upc[zz][ind],
+                dnc[zz][ind],
+                bgc[zz][ind]
             ])
             negPvalPoints[zz].append([
-                -numpy.log10(pdic_up[zz][ind]), -numpy.log10(pdic_dn[zz][ind])
+                # AUDIT F14: retain underflowed p=0 in plots without masking it as unavailable.
+                -numpy.log10(max(pdic_up[zz][ind], numpy.nextafter(0.0, 1.0))),
+                -numpy.log10(max(pdic_dn[zz][ind], numpy.nextafter(0.0, 1.0)))
             ])
             for yy in drawPoints[zz][ind]:  ## examine three values
                 if yy > maxPointValue:  ## new max here
@@ -1119,30 +1027,19 @@ def plotMotifs(
 
 
 def printCountDist(cdist, tName, tMotif):
-    rName = {
-        0: 'UpstreamExon_3prime',
-        1: 'UpstreamExonIntron',
-        2: 'UpstreamIntron',
-        3: 'TargetExon_5prime',
-        4: 'TargetExon-3prime',
-        5: 'DownstreamIntron',
-        6: 'DownstreamExonIntron',
-        7: 'DownstreamExon_5prime'
-    }
-    for fff in ['up', 'dn', 'bg']:
-        desFile = open(
-            tempPath + '/' + tName + '.' + tMotif + '.countDist.' + fff +
-            '.txt', 'w')
-        desFile.write('Region\tposition\tsum\tvalues\n')
-        for zz in range(8):  ## for 8 regions
-            for locus in range(len(cdist[fff][zz])):
-                desFile.write(rName[zz] + '\t' + str(locus) + '\t' +
-                              str(sum(cdist[fff][zz][locus])) + '\t[')
-                desFile.write(
-                    ','.join([str(ccc)
-                              for ccc in cdist[fff][zz][locus]]) + ']\n')
-        desFile.close()
-
+    # AUDIT F6: expose per-window eligible denominators alongside binary values.
+    for label in ('up', 'dn', 'bg'):
+        filename = os.path.join(tempPath, tName + '.' + tMotif + '.countDist.' + label + '.txt')
+        with open(filename, 'w') as handle:
+            handle.write('Region\tposition\tsum\teligible\tdensity\tvalues\n')
+            for index, name in enumerate(REGION_NAMES):
+                for locus, values in cdist[label][index].items():
+                    eligible = [value for value in values if value is not None]
+                    density = binary_density(values)
+                    handle.write(f'{name}\t{locus * sLen}\t{sum(eligible)}\t{len(eligible)}\t' +
+                                 ('NA' if not numpy.isfinite(density) else str(density)) + '\t[' +
+                                 ','.join('NA' if value is None else str(value) for value in values) + ']\n')
+        run_outputs.append(filename)
 
 def computePValues(cdist_one, cdist_two,
                      test_p):  ## count p value for one vs. two
@@ -1157,12 +1054,19 @@ def computePValues(cdist_one, cdist_two,
         7: 'DownstreamExon_5prime'
     }
     rng = numpy.random.default_rng(stat_seed)
+    reasons = {}
+    globals().setdefault("stat_reasons", {})[id(test_p)] = reasons
 
     for zz in range(8):  ## for 8 regions
         test_p[zz] = {}
         for locus in range(len(cdist_one[zz])):
-            first = cdist_one[zz][locus]
-            second = cdist_two[zz][locus]
+            # AUDIT F6: ineligible events leave both numerator and denominator.
+            first = [v for v in cdist_one[zz][locus] if v is not None]
+            second = [v for v in cdist_two[zz][locus] if v is not None]
+            if not first or not second:
+                test_p[zz][locus] = float('nan')
+                reasons[(zz, locus)] = 'no eligible events in one or both sets'
+                continue
             try:
                 if stat_method == 'mannwhitney_greater':
                     pvalue = float(stats.mannwhitneyu(first, second, alternative='greater')[1])
@@ -1184,44 +1088,29 @@ def computePValues(cdist_one, cdist_two,
                             ge_count += 1
                     pvalue = (ge_count + 1.0) / (stat_permutations + 1.0)
                 else:
-                    pvalue = float(stats.fisher_exact(
-                        [[
-                            sum(first),
-                            max(0, len(first) - sum(first))
-                        ],
-                         [
-                             sum(second),
-                             max(0, len(second) - sum(second))
-                         ]], 'greater')[1])
-            except Exception:
-                pvalue = 1.0
+                    # AUDIT F1: Fisher uses eligible binary events, not motif occurrences.
+                    pvalue = float(stats.fisher_exact(binary_table(first, second),
+                                   alternative=args.fisher_alternative)[1])
+            except Exception as exc:
+                # AUDIT F14: statistical exceptions must retain diagnostic context.
+                raise RuntimeError(f'{stat_method}: {REGION_NAMES[zz]} window {locus * sLen}: {exc}') from exc
 
             if not numpy.isfinite(pvalue):
-                pvalue = 1.0
+                reasons[(zz, locus)] = 'nonfinite statistical result'
+                pvalue = float('nan')
             test_p[zz][locus] = pvalue
     return test_p
 
 
-def printPval(pdic, dFile, eNum):  ## print p values per position
-    rName = {
-        0: 'UpstreamExon_3prime',
-        1: 'UpstreamExonIntron',
-        2: 'UpstreamIntron',
-        3: 'TargetExon_5prime',
-        4: 'TargetExon-3prime',
-        5: 'DownstreamIntron',
-        6: 'DownstreamExonIntron',
-        7: 'DownstreamExon_5prime'
-    }
+def printPval(pdic, dFile, eNum):
+    # AUDIT F14: unavailable tests are NA with an explicit reason, never p=1.
     header = pvalue_header_label(stat_method)
-    dFile.write('Region\tposition\t' + header + '\n')
-    if eNum == 0:  ## no exons in the group
-        return
-    for zz in range(8):  ## for 8 regions
-        for locus in range(len(pdic[zz])):
-            dFile.write(rName[zz] + '\t' + str(locus) + '\t' +
-                        str(pdic[zz][locus]) + '\n')
-
+    dFile.write('Region\tposition\t' + header + '\treason\n')
+    reasons = globals().get('stat_reasons', {}).get(id(pdic), {})
+    for index, name in enumerate(REGION_NAMES):
+        for locus, pvalue in pdic[index].items():
+            value = str(pvalue) if numpy.isfinite(pvalue) else 'NA'
+            dFile.write(f'{name}\t{locus * sLen}\t{value}\t{reasons.get((index, locus), "")}\n')
 
 def makeIndividualMaps(d, line):
     global mCount, totalExonCount
@@ -1236,6 +1125,7 @@ def makeIndividualMaps(d, line):
     tmpFile.write(tHeader + '\n')
     tmpFile.write(tName + '\t' + tMotif + '\n')
     tmpFile.close()
+    run_outputs.append(tempPath + '/' + tName + '.' + tMotif + '.txt')
     tmpFile = open(tempPath + '/' + tName + '.' + tMotif + '.txt')
     mCount = {}
     motifs = initMotif(tmpFile, mCount)
@@ -1253,6 +1143,7 @@ def makeIndividualMaps(d, line):
                cdist)
     upbgPFile.close()
     dnbgPFile.close()
+    run_outputs.extend([upbgPFile.name, dnbgPFile.name])
     tmpFile.close()
 
 
@@ -1268,86 +1159,27 @@ def wccount(filename):
 
 
 def minPvalueOut(exonType):
-    global outPath
-    global tempPath
-
-    def bucket_min(values):
-        return min(values) if values else 1.0
-
-    fileList = ""
-    resultFile = ""
-    if exonType == "up":
-        fileList = glob.glob(tempPath + "/" + "*.pVal.up.vs.bg.txt")
-        resultFile = "pVal.up.vs.bg.RNAmap.txt"
-    elif exonType == "down":
-        fileList = glob.glob(tempPath + "/" + "*.pVal.dn.vs.bg.txt")
-        resultFile = "pVal.dn.vs.bg.RNAmap.txt"
-    else:
-        logging.debug("Exon type is not correct in Minimum p-Value list...")
-        return
-    pValList = []
-    for fN in fileList:
-        pValData = open(fN, "r")
-        pValUpExon3pChunk = []
-        pValUpExonIntronChunk = []
-        pValUpIntronChunk = []
-        pValTg5pChunk = []
-        pValTg3pChunk = []
-        pValDnIntronChunk = []
-        pValDnExonIntronChunk = []
-        pValDnExon5pChunk = []
-        for eachLine in pValData:
-            tmpStr = eachLine.strip().split('\t')
-            if tmpStr[0] == "DownstreamExon_5prime":
-                pValDnExon5pChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "DownstreamExonIntron":
-                pValDnExonIntronChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "DownstreamIntron":
-                pValDnIntronChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "TargetExon-3prime":
-                pValTg3pChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "TargetExon_5prime":
-                pValTg5pChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "UpstreamIntron":
-                pValUpIntronChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "UpstreamExonIntron":
-                pValUpExonIntronChunk.append(float(tmpStr[-1]))
-            elif tmpStr[0] == "UpstreamExon_3prime":
-                pValUpExon3pChunk.append(float(tmpStr[-1]))
-            else:
-                pass
-        pValUpExon3pChunk.sort()
-        pValUpExonIntronChunk.sort()
-        pValUpIntronChunk.sort()
-        pValTg5pChunk.sort()
-        pValTg3pChunk.sort()
-        pValDnIntronChunk.sort()
-        pValDnExonIntronChunk.sort()
-        pValDnExon5pChunk.sort()
-        fileName = os.path.basename(fN.strip())
-        pValList.append([
-            fileName[:-18], bucket_min(pValUpExon3pChunk), bucket_min(pValUpExonIntronChunk),
-            bucket_min(pValUpIntronChunk), bucket_min(pValTg5pChunk), bucket_min(pValTg3pChunk),
-            bucket_min(pValDnIntronChunk), bucket_min(pValDnExonIntronChunk),
-            bucket_min(pValDnExon5pChunk)
-        ])
-    pValList.sort(key=operator.itemgetter(2))
-    fileOpen = open(outPath + "/" + resultFile, "w")
-    fileOpen.write(
-        "RBP\tsmallest_p_in_upstreamExon-3prime\tsmallest_p_in_upstreamExonIntron\tsmallest_p_in_upstreamIntron\tsmallest_p_in_targetExon-5prime\tsmallest_p_in_targetExon-3prime\tsmallest_p_in_downstreamIntron\tsmallest_p_in_downstreamExonIntron\tsmallest_p_in_downstreamExon-5prime\n"
-    )
-    for sortedPvalue in pValList:
-        fileOpen.write(sortedPvalue[0] + '\t' + str(sortedPvalue[1]) + '\t' +
-                       str(sortedPvalue[2]) + '\t' + str(sortedPvalue[3]) +
-                       '\t' + str(sortedPvalue[4]) + '\t' +
-                       str(sortedPvalue[5]) + '\t' + str(sortedPvalue[6]) +
-                       '\t' + str(sortedPvalue[7]) + '\t' +
-                       str(sortedPvalue[8]) + '\n')
-    fileOpen.close()
-
-
-
-
+    # AUDIT F8: aggregate only positional tables produced for current-run motifs.
+    suffix = 'up' if exonType == 'up' else 'dn'
+    rows = []
+    for motif_id in run_motif_ids:
+        filename = os.path.join(tempPath, motif_id + '.pVal.' + suffix + '.vs.bg.txt')
+        buckets = {name: [] for name in REGION_NAMES}
+        with open(filename) as handle:
+            next(handle)
+            for line in handle:
+                fields = line.rstrip('\n').split('\t')
+                if fields[2] != 'NA':
+                    buckets[fields[0]].append(float(fields[2]))
+        # AUDIT F14: a region with no usable test remains explicitly unavailable.
+        rows.append([motif_id] + [min(buckets[name]) if buckets[name] else None for name in REGION_NAMES])
+    rows.sort(key=lambda row: (row[2] is None, row[2] if row[2] is not None else 0))
+    filename = os.path.join(outPath, 'pVal.' + suffix + '.vs.bg.RNAmap.txt')
+    with open(filename, 'w') as handle:
+        handle.write('RBP\tsmallest_p_in_upstreamExon-3prime\tsmallest_p_in_upstreamExonIntron\tsmallest_p_in_upstreamIntron\tsmallest_p_in_targetExon-5prime\tsmallest_p_in_targetExon-3prime\tsmallest_p_in_downstreamIntron\tsmallest_p_in_downstreamExonIntron\tsmallest_p_in_downstreamExon-5prime\n')
+        for row in rows:
+            handle.write('\t'.join('NA' if value is None else str(value) for value in row) + '\n')
+    run_outputs.append(filename)
 
 def _build_worker_state():
     state = {}
@@ -1371,9 +1203,11 @@ def _init_worker(state):
 
 
 def _make_individual_map_worker(line):
+    global run_outputs
+    run_outputs = []
     d = []
     makeIndividualMaps(d, line)
-    return d[0] if d else None
+    return (d[0] if d else None, run_outputs)
 
 
 def maybe_plot_motif_map(mapname, maxPointValue, maxNegPval, drawPoints,
@@ -1387,11 +1221,13 @@ def maybe_plot_motif_map(mapname, maxPointValue, maxNegPval, drawPoints,
                                     f'{event_type}.{safe_map_name}.pdf')
             png_path = os.path.join(out_dir, 'maps',
                                     f'{event_type}.{safe_map_name}.png')
+            before = _plot_snapshot((pdf_path, png_path))
             try:
                 pdf_ok, png_ok = drawutils.export_motif_map_fallback(
                     event_type, mapname, drawPoints, negPvalPoints,
                     maxPointValue, maxNegPval, pdf_path, png_path,
                     logger=logging)
+                _record_plot_writes(before)
                 if pdf_ok or png_ok:
                     logging.info(
                         "Motif fallback plot generated for %s (PDF: %s, PNG: %s)",
@@ -1417,8 +1253,23 @@ def maybe_plot_motif_map(mapname, maxPointValue, maxNegPval, drawPoints,
 
 
 def run_individual_map_workers(lines):
+    global run_outputs
+    lines = [line for line in lines if line.strip()]
+    if not lines:
+        return []
+    # AUDIT F8: summaries use only motif identifiers produced by this run.
+    motif_ids = ['.'.join(line.strip().split('\t')[:2]) for line in lines]
+    if len(set(motif_ids)) != len(motif_ids) or set(motif_ids) & set(run_motif_ids):
+        raise ValueError('Duplicate RBP/motif output identifier in motif inputs')
+    run_motif_ids.extend(motif_ids)
+    saved_outputs = run_outputs
     worker_state = _build_worker_state()
-    worker_count = max(1, multiprocessing.cpu_count() - 1)
+    # AUDIT F20: use the requested allocation, bounded by the actual motif count.
+    worker_count = min(args.workers, len(lines))
+    if worker_count == 1:
+        results = [_make_individual_map_worker(line) for line in lines]
+        run_outputs = saved_outputs + [path for _, paths in results for path in paths]
+        return [result for result, _ in results if result is not None]
     try:
         with multiprocessing.get_context("spawn").Pool(
                 processes=worker_count,
@@ -1431,11 +1282,12 @@ def run_individual_map_workers(lines):
         )
         _init_worker(worker_state)
         results = [_make_individual_map_worker(line) for line in lines]
-    return [r for r in results if r is not None]
+    run_outputs = saved_outputs + [path for _, paths in results for path in paths]
+    return [result for result, _ in results if result is not None]
 
 
 def run_pipeline():
-    global genome, start, uNum, dNum, bNum, tHeader
+    global genome, start, uNum, dNum, bNum, tHeader, event_sets, region_data, totalExonCount
     logging.debug("================================")
     logging.debug("GETTING GENOME FASTA OBJECT")
     genome = load_genome(args.genome, fasta_root_PATH)
@@ -1453,6 +1305,13 @@ def run_pipeline():
         sys.exit(-1)
     logging.debug("DONE MAKING INPUT FILES FROM rMATS FILE")
     logging.debug("================================")
+
+    # AUDIT F13: all input paths converge on one validated eight-column schema.
+    coord_paths = {label: os.path.join(exonPath, label + '.coord.txt') for label in ('up', 'dn', 'bg')}
+    event_sets = read_event_sets(coord_paths, genome, allow_overlap=args.allow_overlap)
+    totalExonCount = {label: len(events) for label, events in event_sets.items()}
+    run_outputs.extend(coord_paths.values())
+    region_data = {}
 
     logging.debug("================================")
     logging.debug("MAKING FASTA FILES")
@@ -1552,6 +1411,19 @@ def run_pipeline():
     logging.debug("Program ran %.2d:%.2d:%.2d" %
                   (runningTime / 3600,
                    (runningTime % 3600) / 60, runningTime % 60))
+
+    # AUDIT F7: old temporary cleanup is opt-in; do not recursively remove directories.
+    if args.delete_temp:
+        for filename in Path(tempPath).iterdir():
+            if filename.is_file():
+                filename.unlink()
+        if not any(Path(tempPath).iterdir()):
+            Path(tempPath).rmdir()
+    # AUDIT F8: hash the actual completed run, with effective statistical settings.
+    logging.shutdown()
+    parameters = dict(vars(args), stat_method=stat_method,
+                      stat_permutations=stat_permutations, stat_seed=stat_seed)
+    write_run_manifest(outPath, [filename for filename in run_outputs if Path(filename).is_file()], parameters)
 
     sys.exit(0)
 
