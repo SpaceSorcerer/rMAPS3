@@ -1,0 +1,27 @@
+# YAML requires an already installed PyYAML; otherwise use example_generic.json.
+# Replace paths with local inputs; relative paths resolve beside this config.
+arm: generic_presplit
+inputs:
+  up: ../inputs/generic/up.coord.txt
+  dn: ../inputs/generic/dn.coord.txt
+  bg: ../inputs/generic/bg.coord.txt
+genome:
+  root: ../references/rmaps_genomes
+  build: hg38
+motifs:
+  known: ../data/knownMotifs.human.mouse.txt
+engine:
+  stat_method: fisher
+  fisher_alternative: greater
+  workers: 1
+  window: 50
+  step: 1
+  intron: 250
+  exon: 50
+  force_motif_fallback: true
+blas_threads: 1
+summary:
+  perms: 2000
+  seed: 149
+  workers: 1
+output_root: ../runs/generic_presplit

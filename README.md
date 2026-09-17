@@ -139,3 +139,93 @@ Open `http://127.0.0.1:5000`.
 ## Troubleshooting
 
 See [`docs/FAQ.md`](docs/FAQ.md) for common setup and runtime issues.
+
+## Running on rMATS-turbo 4.3.0 output (pre-split mode) — lab workflow
+
+Pre-split SE inputs make foreground/background selection explicit and reproducible.
+The native rMATS classifier and standalone `exon-sets se` helper do not implement
+the lab's coverage/expression gates; the latter also assumes obsolete expression
+columns and emits a different coordinate schema. Use
+[`tools/build_event_sets.py`](tools/build_event_sets.py) through the wrapper below.
+Its portable Rule-A builder adapts the frozen `reli_v121` selection logic, with
+source attribution retained in the file. Rule-B rMATS/VAST concordant selection
+requires externally prepared pre-split sets; it is not rebuilt by this wrapper.
+
+Each of `up`, `dn` and `bg` is a nonempty tab-separated file with this mandatory
+eight-column header (the spaces displayed here must be tabs in the actual file):
+
+```text
+chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd
+```
+
+- Starts are zero-based and ends exclusive. Keep rMATS starts and ends unchanged.
+  `firstExon` is genomic-left and `secondExon` genomic-right, on both strands;
+  use `+`/`-`. Do not add gene identifiers to the eight-column file.
+- Lab foreground: FDR < 0.05, |dPSI| >= 0.10, IJC+SJC >= 10 in **every sample**,
+  and DESeq2 baseMean > 50. Absent expression records are `expr_unknown` and
+  retained. Apply coverage/expression gates symmetrically to background,
+  require background FDR >= 0.5, and remove foreground events.
+- Direction follows the configured treatment group and rMATS dPSI sign; record
+  group identity explicitly. Human lab references are GRCh38/hg38, GENCODE v49;
+  the motif engine reads the specified FASTA, not a GTF.
+- The wrapper checks chromosome names against `<root>/<build>/<build>.fa.fai`.
+  It can add/remove `chr` only to match an existing key (including scaffold names);
+  unresolved names fail. This is name normalization, not a genome-build conversion.
+
+Edit a copy of [`configs/example_miat_qki.json`](configs/example_miat_qki.json)
+or [`configs/example_generic.json`](configs/example_generic.json), then run:
+
+```bash
+python tools/rmaps3_lab_run.py --config configs/example_miat_qki.json
+```
+
+Paths in config files resolve relative to the config's directory. Set either
+`inputs.up/dn/bg` or `inputs.rmats_se` plus gates and optional `inputs.deseq2`;
+set `genome.root/build`, `motifs.known/additional`, `output_root`, `engine`,
+`blas_threads`, and `summary`. Output roots must be absent or empty. The wrapper
+writes prepared `inputs/`, `engine/`, `summary/`, and a `run_manifest.json` with
+config hash, revision, versions, input MD5s and step records. The `.yaml` examples
+contain the same settings but require an already installed PyYAML; otherwise YAML
+is rejected clearly and the JSON companions work without it. The wrapper adds
+no package installation step.
+
+The corresponding direct engine invocation from the repository root is:
+
+```bash
+python cli.py motif-map se --known-motifs data/knownMotifs.human.mouse.txt --motifs data/ESRP.like.motif.txt --fasta-root genomedata --genome hg38 --rMATS NA --miso NA --up inputs/up.coord.txt --down inputs/dn.coord.txt --background inputs/bg.coord.txt --output results/MIAT_KD/engine --stat-method fisher --fisher-alternative greater --workers 4 --intron 250 --exon 50 --window 50 --step 1 --keep-temp
+```
+
+Set `RMAPS_FORCE_MOTIF_FALLBACK=1` when using the tested simplified Pillow plots.
+The wrapper configures BLAS thread caps before launching children; the lab example
+uses four threads and one summarizer worker. On Windows a venv launcher can spawn
+a different base interpreter, so inspect the active child process before diagnosing
+an idle job. Use one summarizer worker if spawn fails with `DuplicateHandle`.
+
+Keep `temp/` positional p-values and count distributions, plus
+`positional/*.hits.npz`, `exon/` coordinate files and the engine manifest.
+The NPZ schema is version 2 and readers must preserve eligibility masks;
+`rmaps_core.positional_io` provides the readers. Root `pVal.*.RNAmap.txt` tables
+contain raw regional minima, not calibrated region p-values. The wrapper runs
+the copied v4 summarizer automatically; a separate invocation is:
+
+```bash
+python tools/summarize_rmaps_regions.py --run results/MIAT_KD/engine --out results/MIAT_KD/summary --arm MIAT_KD --perms 2000 --seed 149 --workers 1
+```
+
+The summarizer preserves v4's exact log-space hypergeometric-tail arithmetic and
+Westfall–Young min-P label permutations. It reports the native layer alongside
+calibrated pooled regions (upstream intron, exon body, downstream intron), with BH
+across motif × plotted pool × direction. BH on native raw minima is descriptive
+and does not correct their within-region selection. Flanking-exon results are
+retained outside that calibrated plotting family. Outputs include
+`per_motif_regions.tsv`, `condensed_per_rbp.tsv`, `positions_long.tsv` and the
+arm's summary workbook. The condensed best-motif rows retain motif-level q-values;
+they are not a separate RBP-level hypothesis test. This calibration supports
+one-sided greater Fisher runs; the wrapper rejects other methods before execution.
+Use `--perms 20` on the wrapper only for a synthetic smoke test.
+
+Read [the migration note](docs/MIGRATION_2026-09.md) for complete-window geometry,
+changed FASTA crops, temporary-output retention and schemas; read
+[LESSONS.md](LESSONS.md) for source/commit evidence and historical reproduction
+limits. The corrected engine is not numerically equivalent to the old web-server
+calculation merely because both report Fisher p-values.
