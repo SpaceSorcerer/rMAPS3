@@ -71,3 +71,25 @@ All drive paths below are **lab-local evidence**, unavailable in a standalone cl
 - `F:\rMAPS\CLAUDE.md`, locked conventions and operational footgun bullets: launcher, spawn permissions, thread budgets and path escaping.
 - `E:\rmaps_summ\scripts\summarize_rmaps_regions_v4.py`: downstream calibration implementation; exact hypergeometric upper tails are evaluated in log space, preserving the v4 arithmetic.
 - Portable contracts: [CLI usage](docs/CLI_USAGE.md), [migration notes](docs/MIGRATION_2026-09.md), and branch history `git log --oneline upstream-base-2026-09-16..HEAD`.
+
+## Addendum (September 17, 2026): ordering versus significance, and the authors' layer
+
+- Show the authors' method first, untouched. The released engine at the upstream base commit is kept as a
+  separate layer (raw per-region minimum Fisher p, no adjustment, constant dot size because the tool reports no
+  enrichment ratio). Lab additions (exon-level counting, BH, permutation calibration) are separate, labelled layers.
+- Multiple-testing adjustment never changes the ORDER of RBPs (BH is monotone) and the Westfall-Young calibration
+  barely does (rank correlation 0.98 to 0.99 with the raw-p order). What changes the order is the counting fix:
+  motif hits per exon (released) versus exons carrying the motif (audited) agree at rank correlation 0.75 to 0.86 and
+  share only 4 to 6.5 of each panel's top 10. The QKI positive control is first in its two control panels under every layer.
+- Permutation floor: with 2,000 label permutations the calibrated p cannot go below 1/2001. A two-stage scheme
+  (100,000 fresh permutations for tests with stage-1 p <= 0.005) lifts strong signals to q ~ 0.002 at a few
+  dozen refined tests per arm; each refined p is a valid Monte Carlo p on its own.
+- Rank stability by resampling the changed exons (300 bootstraps of the foreground, background fixed): at about
+  100 to 600 events per direction only the top 1 to 3 RBPs per panel are reproducible (top-10 frequency >= 0.8);
+  positions 4 to 10 are not. Report order with this stability measure, not with p-values alone.
+- Legacy RBP names in the shipped motif table (9G8, BRUNOL4/5/6, HNRPLL, HuR, PTB, SF2-ASF, SRp20, SRp40, SRp55,
+  Tra2-beta) resolve through HGNC alias/previous-symbol records (tools/ users: see the alias table format in
+  the lab workflow); SF2-ASF, 9G8 and PTB merge into SRSF1, SRSF7 and PTBP1. 9G8 and SRp40 are HGNC-ambiguous.
+- VAST-tools human database Hs2 is hg38 on Ensembl v88 (README); gene labels differ from GENCODE v49 for a few
+  percent of exons, so a coordinate-based join with a gene requirement loses ~5 % of matches. This is annotation
+  vintage, not a coordinate error (no +/-1 bp offset spike; direction agreement 92 to 96 % on reciprocal-unique matches).

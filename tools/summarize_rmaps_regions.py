@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Summarize fixed-engine rMAPS3 SE output and calibrate regional minima."""
+"""Summarize rMAPS3 SE output with optional independent permutation refinement.
+
+For a pre-specified statistic, each fresh stage-2 plus-one estimate is a valid
+Monte Carlo p-value under label exchangeability. Selecting whether to report B1
+or B2 using the stage-1 p-value is adaptive: the final mixture is not guaranteed
+super-uniform, and the usual BH FDR guarantee is not established by refinement.
+Stage 1 is unchanged from v4. With refinement disabled the scientific TSVs and
+readout match v4 byte-for-byte; workbook provenance and command logs necessarily
+retain the actual script identity, command, and measured timing.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +20,6 @@ import json
 import math
 import os
 import platform
-import re
 import subprocess
 import sys
 import time
@@ -24,12 +32,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from scipy.special import gammaln
 from scipy.stats import false_discovery_control, fisher_exact, hypergeom
-
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-from rmaps_core.positional_io import load_hits
 
 
 REGIONS = (
@@ -314,6 +316,117 @@ def calibrate_min_p(
     return CalibrationResult(observed_min, float(calibrated), perm_min, "", observed_p)
 
 
+def _sample_assignment_counts(binary, eligibility, labels, number, rng,
+                              total_hit=None, total_elig=None):
+    """Uniform fixed-cardinality subsets; sum the smaller assigned event set."""
+    labels = np.asarray(labels, dtype=bool)
+    n_events = labels.size
+    n_foreground = int(labels.sum())
+    complement = n_foreground > n_events - n_foreground
+    sample_size = n_events - n_foreground if complement else n_foreground
+    if complement:
+        if total_hit is None:
+            total_hit = np.sum(binary, axis=0, dtype=np.int64)
+        if total_elig is None:
+            total_elig = np.sum(eligibility, axis=0, dtype=np.int64)
+    fg_hit = np.empty((number, binary.shape[1]), dtype=np.int64)
+    fg_elig = np.empty_like(fg_hit)
+    for i in range(number):
+        selected = rng.choice(n_events, sample_size, replace=False)
+        hits_sum = np.sum(binary[selected], axis=0, dtype=np.int64)
+        eligible_sum = np.sum(eligibility[selected], axis=0, dtype=np.int64)
+        fg_hit[i] = total_hit - hits_sum if complement else hits_sum
+        fg_elig[i] = total_elig - eligible_sum if complement else eligible_sum
+    return fg_hit, fg_elig
+
+
+def refine_calibration(
+    hits: np.ndarray,
+    labels: np.ndarray,
+    permutations: int,
+    seed: int,
+    direction: str,
+    statistic: str,
+    chunk_size: int = 500,
+    eligible: np.ndarray | None = None,
+) -> CalibrationResult:
+    """Fresh fixed-B Monte Carlo calibration using uniform assignment subsets.
+
+The same stage-2 stream is reused across motifs for each statistic/direction.
+Region indices are 0..7; pooled indices are 8..11 in declaration order.
+    This standalone p-value is valid under exchangeability for a pre-specified
+    statistic. Adaptive selection of the reported stage has no such guarantee.
+    Uniform sampling without replacement of the smaller foreground/background
+    set is distributionally identical to shuffling the complete binary labels.
+    It uses a different realized RNG sequence from full label shuffles. Counts
+    use exact int64 sums; auxiliary memory is chunk_size x n_windows plus one
+    min(n_foreground, n_background) x n_windows gather, never B2 x n_events.
+"""
+    if permutations < 1 or chunk_size < 1:
+        raise ValueError("permutations and chunk_size must be positive")
+    statistics = list(REGIONS) + list(POOL_TO_REGIONS)
+    if statistic not in statistics or direction not in DIRECTION_CODE:
+        raise ValueError("Unknown statistic or direction for refinement seed stream")
+    rng = np.random.default_rng(np.random.SeedSequence(
+        [seed, 2, statistics.index(statistic), DIRECTION_CODE[direction]]
+    ))
+    raw_hits = np.asarray(hits)
+    labels = np.asarray(labels, dtype=bool)
+    if eligible is None:
+        eligible = ~np.isnan(raw_hits.astype(float))
+        hits = np.nan_to_num(raw_hits, nan=0.0).astype(bool)
+    else:
+        eligible = np.asarray(eligible, dtype=bool)
+        hits = raw_hits.astype(bool) & eligible
+    observed, observed_p = _assignment_min_p(
+        hits, eligible, labels.astype(np.uint8)[None, :], "greater", 1
+    )
+    minima = np.full(permutations, np.nan)
+    if not np.any(np.isfinite(observed_p)):
+        return CalibrationResult(math.nan, math.nan, minima,
+                                 "no window has eligible events in both sets", observed_p)
+    binary = np.asarray(hits, dtype=bool)
+    eligibility = np.asarray(eligible, dtype=bool)
+    total_hit = np.sum(binary, axis=0, dtype=np.int64)
+    total_elig = np.sum(eligibility, axis=0, dtype=np.int64)
+    tail_cache = {}
+    for start in range(0, permutations, chunk_size):
+        stop = min(start + chunk_size, permutations)
+        fg_hit, fg_elig = _sample_assignment_counts(
+            binary, eligibility, labels, stop - start, rng, total_hit, total_elig
+        )
+        pvalues = _cached_greater_pvalues(fg_hit, fg_elig, total_hit, total_elig, tail_cache)
+        valid = np.any(np.isfinite(pvalues), axis=1)
+        minima[start:stop][valid] = np.nanmin(pvalues[valid], axis=1)
+    observed_min = float(observed[0])
+    p = (1 + int(np.sum(minima[np.isfinite(minima)] <= observed_min))) / (1 + permutations)
+    return CalibrationResult(observed_min, float(p), minima, "", observed_p)
+
+
+def select_refinement_tasks(records: list[dict], threshold: float, max_tasks: int):
+    """Return selected and deferred record indices, ordered by p then input index."""
+    if not 0 <= threshold <= 1 or max_tasks < 0:
+        raise ValueError("threshold must be in [0, 1] and max_tasks nonnegative")
+    qualifying = [i for i, record in enumerate(records)
+                  if math.isfinite(record["calib_p"]) and record["calib_p"] <= threshold]
+    qualifying.sort(key=lambda i: (records[i]["calib_p"], i))
+    return qualifying[:max_tasks], qualifying[max_tasks:]
+
+
+_STAGE1_PROGRESS = None
+
+
+def _progress_motifs(motifs):
+    for motif in motifs:
+        yield motif
+        if _STAGE1_PROGRESS is not None:
+            _STAGE1_PROGRESS[0] += 1
+            done, total, started = _STAGE1_PROGRESS
+            if done % 100 == 0 or done == total:
+                print(f"stage 1: {done}/{total} tasks, elapsed {time.perf_counter() - started:.1f}s",
+                      file=sys.stderr, flush=True)
+
+
 def bh_adjust(values: np.ndarray | list[float]) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     out = np.full(values.shape, np.nan)
@@ -344,6 +457,11 @@ def read_manifest(path: Path) -> dict:
 
 def load_sparse_hits(path: Path, engine_root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load schema-2 positional data only via the engine's public loader."""
+    engine_text = str(Path(engine_root).resolve())
+    if engine_text not in sys.path:
+        sys.path.insert(0, engine_text)
+    from rmaps_core.positional_io import load_hits
+
     hits, eligible, labels = load_hits(path)
     hits = np.asarray(hits, dtype=bool)
     eligible = np.asarray(eligible, dtype=bool)
@@ -385,7 +503,7 @@ def _region_calibration_task(args):
     use = None
     perm_matrix = None
     output = []
-    for motif in motifs:
+    for motif in _progress_motifs(motifs):
         path = run / "positional" / f"{motif}.{region}.hits.npz"
         if not path.exists():
             output.append((motif, None, f"missing hit matrix: {path.name}"))
@@ -426,7 +544,7 @@ def _pooled_calibration_task(args):
     binary_labels = None
     perm_matrix = None
     output = []
-    for motif in motifs:
+    for motif in _progress_motifs(motifs):
         loaded = []
         missing = None
         for region in member_regions:
@@ -541,6 +659,74 @@ def flatten_json(value, prefix="") -> list[dict[str, str]]:
     return rows
 
 
+def _refine_records(run, engine_root, rows, pooled_records, permutations, seed,
+                    refine_perms, threshold, max_tasks, chunk_size):
+    started = time.perf_counter()
+    records = []
+    targets = []
+    for row in rows:
+        row.update(calib_perms_used=permutations, calib_stage=1)
+        records.append({"kind": "region", "motif_key": row["motif_key"],
+                        "direction": row["direction"], "statistic": row["region"],
+                        "calib_p": row["calib_p"]})
+        targets.append(row)
+    for (motif, direction, pool_name), record in pooled_records.items():
+        record.update(calib_perms_used_pooled=permutations, calib_stage_pooled=1)
+        records.append({"kind": "pooled", "motif_key": motif, "direction": direction,
+                        "statistic": pool_name, "calib_p": record["calib_p_pooled"]})
+        targets.append(record)
+    selected, deferred = select_refinement_tasks(records, threshold, max_tasks)
+    print(f"stage 2: {len(selected)} selected, {len(deferred)} qualifying tasks deferred by guard",
+          file=sys.stderr, flush=True)
+    audit = []
+    for done, index in enumerate(selected, 1):
+        task = records[index]
+        task_started = time.perf_counter()
+        member_regions = ((task["statistic"],) if task["kind"] == "region"
+                          else POOL_TO_REGIONS[task["statistic"]])
+        matrices = []
+        eligibilities = []
+        labels = None
+        for region in member_regions:
+            path = run / "positional" / f"{task['motif_key']}.{region}.hits.npz"
+            hits, eligible, current_labels = load_sparse_hits(path, engine_root)
+            if labels is not None and not np.array_equal(labels, current_labels):
+                raise ValueError(f"Event label mismatch during pooled refinement: {path}")
+            labels = current_labels
+            use = np.isin(labels, [DIRECTION_CODE[task["direction"]], 2])
+            matrices.append(hits[use])
+            eligibilities.append(eligible[use])
+        result = refine_calibration(
+            np.concatenate(matrices, axis=1), labels[use] == DIRECTION_CODE[task["direction"]],
+            refine_perms, seed, task["direction"], task["statistic"], chunk_size,
+            np.concatenate(eligibilities, axis=1),
+        )
+        target = targets[index]
+        suffix = "" if task["kind"] == "region" else "_pooled"
+        previous_observed = target[f"calib_observed_min_p{suffix}"]
+        if not math.isclose(result.observed_min_p, previous_observed, rel_tol=1e-12, abs_tol=0):
+            raise ValueError(f"Observed minimum changed during refinement: {task}")
+        target[f"calib_p{suffix}"] = result.calib_p
+        target[f"calib_perms_used{suffix}"] = refine_perms
+        target[f"calib_stage{suffix}"] = 2
+        audit.append({**task, "status": "refined", "final_calib_p": result.calib_p,
+                      "calib_perms_used": refine_perms, "calib_stage": 2,
+                      "wall_seconds": time.perf_counter() - task_started})
+        if done % 100 == 0 or done == len(selected):
+            print(f"stage 2: {done}/{len(selected)} tasks, elapsed {time.perf_counter() - started:.1f}s",
+                  file=sys.stderr, flush=True)
+    for index in deferred:
+        audit.append({**records[index], "status": "deferred_by_guard",
+                      "final_calib_p": records[index]["calib_p"],
+                      "calib_perms_used": permutations, "calib_stage": 1, "wall_seconds": 0.0})
+    for row in rows:
+        row.update(pooled_records[(row["motif_key"], row["direction"], row["pooled_region"])])
+    return {"qualified_tasks": len(selected) + len(deferred), "refined_tasks": len(selected),
+            "deferred_tasks": len(deferred), "stage2_wall_seconds": time.perf_counter() - started,
+            "refine_perms": refine_perms, "refine_threshold": threshold,
+            "refine_max_tasks": max_tasks, "stage2_p_floor": 1 / (1 + refine_perms)}, audit
+
+
 def summarize(
     run: Path,
     out: Path,
@@ -548,11 +734,16 @@ def summarize(
     permutations: int,
     seed: int,
     workers: int,
-    engine_root: Path = REPO_ROOT,
+    engine_root: Path = Path(r"E:\Claude\rMAPS3_fix"),
     chunk_size: int = 500,
+    refine_perms: int = 100000,
+    refine_threshold: float = 0.005,
+    refine_max_tasks: int = 400,
 ) -> dict:
-    if not isinstance(arm, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", arm) is None:
-        raise ValueError("arm must be a filename component starting with a letter or digit and containing only ASCII letters, digits, _, . or -")
+    if workers != 1:
+        raise ValueError("v5 requires workers=1 on this workstation")
+    if refine_perms < 0 or not 0 <= refine_threshold <= 1 or refine_max_tasks < 0:
+        raise ValueError("Invalid refinement permutation count, threshold, or task guard")
     started = time.perf_counter()
     run = run.resolve()
     out = out.resolve()
@@ -563,17 +754,18 @@ def summarize(
     if missing:
         raise FileNotFoundError("Missing required rMAPS3 inputs: " + "; ".join(missing))
     manifest = read_manifest(run / "run_manifest.json")
-    method = manifest.get("statistical_method")
-    if method != "fisher":
-        raise ValueError(f"Regional calibration requires statistical_method='fisher'; found {method!r}")
     alternative = manifest.get("parameters", {}).get("fisher_alternative")
     if alternative != "greater":
         raise ValueError(f"Vectorized calibration requires fisher_alternative='greater'; found {alternative!r}")
+    if manifest.get("parameters", {}).get("genome") != "hg38":
+        raise ValueError("This summarizer run is scoped to human GRCh38/hg38")
     revision = engine_git_revision(engine_root)
     roots = {d: read_root_table(run / f"pVal.{d}.vs.bg.RNAmap.txt") for d in ("up", "dn")}
     motifs = sorted(set(roots["up"]) | set(roots["dn"]))
     if not motifs:
         raise ValueError("No motif rows found in root p-value tables")
+    global _STAGE1_PROGRESS
+    _STAGE1_PROGRESS = [0, len(motifs) * (len(REGIONS) + len(POOL_TO_REGIONS)) * 2, started]
     out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     positions_rows: list[dict] = []
@@ -717,6 +909,13 @@ def summarize(
                 for row in member_rows:
                     row.update(pooled_records[(motif, direction, pool_name)])
 
+    refinement = None
+    refinement_audit = []
+    if refine_perms:
+        refinement, refinement_audit = _refine_records(
+            run, engine_root, rows, pooled_records, permutations, seed,
+            refine_perms, refine_threshold, refine_max_tasks, chunk_size,
+        )
     native_q = bh_adjust([r["native_p"] for r in rows])
     for row, q in zip(rows, native_q):
         row["native_q"] = q
@@ -766,6 +965,18 @@ def summarize(
                     ),
                 })
 
+    if refine_perms:
+        for row in condensed:
+            record = pooled_records[(row["selected_motif_key"], row["direction"], row["pooled_region"])]
+            row.update(calib_perms_used=record["calib_perms_used_pooled"],
+                       calib_stage=record["calib_stage_pooled"])
+        final_p = [pooled_records[key]["calib_p_pooled"] for key in bh_keys]
+        refinement.update(
+            bh_family_size=len(bh_keys),
+            smallest_calib_p=min((p for p in final_p if math.isfinite(p)), default=None),
+            smallest_calib_q=min((float(q) for q in pooled_q if math.isfinite(q)), default=None),
+            singleton_bh_q_floor=min(1.0, len(bh_keys) / (1 + refine_perms)),
+        )
     elapsed_before_write = time.perf_counter() - started
     script_path = Path(__file__).resolve()
     provenance = flatten_json(manifest)
@@ -785,6 +996,26 @@ def summarize(
     ])
     for package in ("numpy", "scipy", "openpyxl"):
         provenance.append({"field": f"summary.package.{package}", "value": importlib.metadata.version(package)})
+    if refine_perms:
+        provenance.extend(flatten_json(refinement, "summary.refinement"))
+        provenance.extend([
+            {"field": "summary.refinement.seed_stream", "value":
+             "numpy SeedSequence([seed,2,statistic_index,direction_index]); regions 0..7 and pools 8..11 in declaration order; up=0,dn=1; shared across motifs; independent from v4 SHA256 stage-1 stream"},
+            {"field": "summary.refinement.statistic_indices", "value":
+             json.dumps(list(REGIONS) + list(POOL_TO_REGIONS))},
+            {"field": "summary.refinement.assignment_sampler", "value":
+             "For each replicate independently use Generator.choice(n_events,min(n_fg,n_bg),replace=False), choosing foreground when n_fg<=n_bg and background otherwise. Sum sampled hit and eligibility rows in int64; subtract from totals for background sampling. Uniform subsets are mathematically equivalent to permuting fixed-cardinality binary labels, but use different realized RNG draws than full-label shuffling."},
+            {"field": "summary.refinement.validity", "value":
+             "Each fresh fixed-B2 plus-one p-value is a valid Monte Carlo p-value for a pre-specified statistic under label exchangeability. Adaptive selection between stage-1 and stage-2 p-values is not guaranteed super-uniform; BH applied to this mixture has no established FDR guarantee from this procedure alone."},
+            {"field": "summary.refinement.pooled_assignments", "value":
+             "Member window matrices concatenated; one common permutation assignment across all pooled windows."},
+            {"field": "summary.refinement.selection", "value":
+             "Global threshold across regional and pooled tasks; smallest stage-1 p first; ties by original record order (regions then pools); deferred tasks retain stage-1 p."},
+        ])
+        _write_tsv(out / "refinement_tasks.tsv", refinement_audit,
+                   ["kind", "motif_key", "direction", "statistic", "calib_p", "status",
+                    "final_calib_p", "calib_perms_used", "calib_stage", "wall_seconds"])
+        (out / "refinement_report.json").write_text(json.dumps(refinement, indent=2) + "\n", encoding="utf-8")
 
     _write_tsv(out / "per_motif_regions.tsv", rows)
     _write_tsv(out / "condensed_per_rbp.tsv", condensed)
@@ -796,6 +1027,11 @@ def summarize(
         f"# {arm} rMAPS3 region summary",
         f"Calibrated Westfall-Young min-P results used {permutations} label permutations with seed {seed}.",
     ]
+    if refine_perms:
+        readout_lines[1] = (f"Stage 1 used {permutations} label permutations with seed {seed}; "
+                            f"{refinement['refined_tasks']} tasks replaced by independent {refine_perms}-permutation calibrations "
+                            f"({refinement['deferred_tasks']} qualifying tasks deferred by guard).")
+        readout_lines.append("Adaptive stage selection does not establish super-uniform final p-values or a BH FDR guarantee; see provenance.")
     for pool_name in ("Upstream Intron", "Exon Body", "Downstream Intron"):
         for direction in ("up", "dn"):
             subset = [r for r in condensed if r["pooled_region"] == pool_name and r["direction"] == direction and math.isfinite(r["calib_q"])]
@@ -807,16 +1043,21 @@ def summarize(
     command = " ".join([str(Path(sys.executable).resolve()), str(script_path), "--run", str(run), "--out", str(out),
                         "--arm", arm, "--perms", str(permutations), "--seed", str(seed), "--workers", str(workers),
                         "--chunk-size", str(chunk_size), "--engine-root", str(engine_root)])
+    command += (f" --refine-perms {refine_perms} --refine-threshold {refine_threshold}"
+                f" --refine-max-tasks {refine_max_tasks}")
     (out / "command.log").write_text(command + "\n", encoding="utf-8")
     (out / "versions.txt").write_text(
         f"Python\t{platform.python_version()}\n" +
         "".join(f"{p}\t{importlib.metadata.version(p)}\n" for p in ("numpy", "scipy", "openpyxl")) +
-        f"genome\t{manifest.get('parameters', {}).get('genome', 'unspecified')}\n",
+        "scope\tHomo sapiens / GRCh38 (hg38) / GENCODE v49\n",
         encoding="utf-8",
     )
     wall = time.perf_counter() - started
-    return {"motifs": len(motifs), "rows": len(rows), "wall_seconds": wall,
-            "workbook": str(workbook), "out": str(out)}
+    result = {"motifs": len(motifs), "rows": len(rows), "wall_seconds": wall,
+              "workbook": str(workbook), "out": str(out)}
+    if refinement is not None:
+        result["refinement"] = refinement
+    return result
 
 
 def parse_args(argv=None):
@@ -826,19 +1067,25 @@ def parse_args(argv=None):
     parser.add_argument("--arm", required=True)
     parser.add_argument("--perms", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=149)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=1, choices=[1])
+    parser.add_argument("--refine-perms", type=int, default=100000)
+    parser.add_argument("--refine-threshold", type=float, default=0.005)
+    parser.add_argument("--refine-max-tasks", type=int, default=400)
     parser.add_argument("--chunk-size", type=int, default=500)
-    parser.add_argument("--engine-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--engine-root", type=Path, default=Path(r"E:\Claude\rMAPS3_fix"))
     args = parser.parse_args(argv)
     if args.perms < 1 or args.workers < 1 or args.chunk_size < 1:
         parser.error("--perms, --workers, and --chunk-size must be positive integers")
+    if args.refine_perms < 0 or args.refine_max_tasks < 0 or not 0 <= args.refine_threshold <= 1:
+        parser.error("--refine-perms/--refine-max-tasks must be nonnegative; --refine-threshold must be in [0,1]")
     return args
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
     result = summarize(args.run, args.out, args.arm, args.perms, args.seed, args.workers,
-                       args.engine_root, args.chunk_size)
+                       args.engine_root, args.chunk_size, args.refine_perms,
+                       args.refine_threshold, args.refine_max_tasks)
     print(json.dumps(result, indent=2))
     return 0
 
