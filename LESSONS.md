@@ -93,3 +93,6 @@ All drive paths below are **lab-local evidence**, unavailable in a standalone cl
 - VAST-tools human database Hs2 is hg38 on Ensembl v88 (README); gene labels differ from GENCODE v49 for a few
   percent of exons, so a coordinate-based join with a gene requirement loses ~5 % of matches. This is annotation
   vintage, not a coordinate error (no +/-1 bp offset spike; direction agreement 92 to 96 % on reciprocal-unique matches).
+
+
+Note (2026-09-17): the two-stage permutation refinement (100,000 fresh permutations for tests with stage-1 p <= 0.005) is implemented in tools/summarize_rmaps_regions_lab_v5.py, the lab version used for the September 2026 figures; tools/summarize_rmaps_regions.py is the portable adapter with input validation and tests.
