@@ -229,3 +229,38 @@ changed FASTA crops, temporary-output retention and schemas; read
 [LESSONS.md](LESSONS.md) for source/commit evidence and historical reproduction
 limits. The corrected engine is not numerically equivalent to the old web-server
 calculation merely because both report Fisher p-values.
+
+### Rank-sum layers: which statistic to report, and how to calibrate it — lab workflow
+
+The reported layer is the authors' released engine run with `--stat-method mannwhitney`. That option ranks one
+observation per eligible exon per window — the exon's motif hit count — which is the published rMAPS/rMAPS2
+observational unit and the only built-in option with a defensible sampling model; the Fisher default sums hits
+into a table whose margins are exon counts. Its p-values, however, come from scipy's asymptotic normal
+approximation with tie correction and the default continuity correction, and with more than 99 % of eligible
+exons carrying no hit that approximation is severely anti-conservative. Report this layer for the ORDER of RBPs
+and say so explicitly; do not quote its p-values as p-values. Note that the audited engine's own `mannwhitney`
+path is not an alternative: it binarizes before ranking (`rmaps_core/se_windows.py`, `WindowCounts.observations`),
+so it scores the same 2x2 as the audited Fisher test. See [LESSONS.md](LESSONS.md) for the worked example.
+
+The supplement is the same statistic with a Westfall–Young min-P label-permutation p and BH q, produced by
+[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py). Calibration leaves the RBP order essentially
+unchanged and removes most of the apparent significance, which is exactly the claim the main layer should make.
+Run the tools in this order: [`tools/compare_stat_methods.py`](tools/compare_stat_methods.py) to decide which
+layer to report and to record how far the methods disagree;
+[`tools/countdist_to_npz.py`](tools/countdist_to_npz.py) to pack the released `temp/*.countDist.*.txt` tables of
+an arm into per-motif count archives, then
+[`tools/verify_ranksum_archives.py`](tools/verify_ranksum_archives.py) to prove those archives reproduce the
+released root and per-position p-values before anything downstream reads them;
+[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) for the calibrated supplement; and
+[`tools/build_region_lollipops_v4.py`](tools/build_region_lollipops_v4.py) for the figures.
+[`tools/count_aware_stats.py`](tools/count_aware_stats.py) is separate: it recomputes count-aware rank and
+Poisson-rate tests from the audited engine's `positional/*.hits.npz` archives, for comparison only. Every tool
+takes its input and output roots as required arguments; none carries a site-specific path.
+
+```bash
+python tools/compare_stat_methods.py --arms QKI_KO_B --runs-root runs --stat-root stat --alias alias.tsv --out results/comparison
+python tools/countdist_to_npz.py --arm QKI_KO_B --released-root stat/released_mannwhitney --out-root results/counts
+python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root stat/released_mannwhitney --counts-root results/counts
+python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary --alias-table alias.tsv --permutations 2000 --seed 149
+python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root results/figures --released-root stat/released_mannwhitney --calibrated-root results/summary --method-comparison results/comparison/method_rank_comparison.tsv --event-sets-root event_sets --alias-table alias.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
+```

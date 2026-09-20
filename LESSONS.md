@@ -96,3 +96,39 @@ All drive paths below are **lab-local evidence**, unavailable in a standalone cl
 
 
 Note (2026-09-17): the two-stage permutation refinement (100,000 fresh permutations for tests with stage-1 p <= 0.005) is implemented in tools/summarize_rmaps_regions_lab_v5.py, the lab version used for the September 2026 figures; tools/summarize_rmaps_regions.py is the portable adapter with input validation and tests.
+
+## Addendum (September 20, 2026): the rank-sum layer, its calibration, and the figure y cap
+
+- **What the released rank test ranks.** `--stat-method mannwhitney` in the released engine ranks ONE value per
+  eligible exon per window: that exon's motif hit COUNT. This is the published rMAPS/rMAPS2 observational unit and
+  the closest built-in option to a valid sampling model. The default Fisher table instead sums hits into a 2x2
+  whose margins are exon counts, so it is not a count of independent Bernoulli exons.
+- **Its p-values are not usable as p-values in this regime.** The engine calls
+  `scipy.stats.mannwhitneyu(first, second, alternative='greater')` with no further keywords, so scipy defaults
+  apply: the asymptotic normal approximation with tie correction and `use_continuity=True`. With more than 99 % of
+  eligible exons carrying no hit, the tie correction collapses the variance and the tail p runs many orders of
+  magnitude below an exact test on the same data. In QKI_KO_B, Downstream Intron x skipped, the QKI motif reports a
+  released rank-sum regional minimum of 1.3e-143 against 1.4e-23 for the exact Fisher test on the binary
+  carrying/not-carrying exon table of that panel; at the argmin window the identical 2x2 gives 3.8e-144 against
+  1.4e-23. Use this layer for RBP ORDER, not for the absolute p.
+- **The audited engine's `mannwhitney` path is NOT count-aware — a known limitation of this fork.**
+  `rmaps_core/se_windows.py:234-235` (`WindowCounts.observations()`) returns `[1] * hits + [0] * (eligible - hits)`,
+  i.e. the same binary per-eligible-exon observations Fisher uses. The audited rank test therefore scores the same
+  2x2 as the audited Fisher test and differs from it only by the normal approximation, so it cannot answer a
+  count-aware question. For a count-aware rank or rate test use `tools/count_aware_stats.py`, or run the released
+  engine, whose countDist tables retain the per-exon counts.
+- **The fix for calibration is permutation, not a different statistic.** `tools/calibrate_ranksum.py` applies
+  Westfall-Young min-P label permutation to THAT SAME rank-sum statistic, exploiting the fact that the pooled
+  multiset of counts at a window is permutation-invariant. Across the calibrated arms x six plotted panels, native
+  and calibrated RBP orderings agree at Spearman >= 0.98 in 18 of 18 panels, while the cells reaching q < 0.05 fall
+  from the hundreds under BH on the raw minima to tens per arm. Order survives calibration; significance does not.
+- **Figure y-axis cap convention.** One shared y-limit per arm x layer, re-derived from that layer's own tests at
+  every build and never cached: 1.25 x the largest -log10 p among RBPs other than the single top RBP of that arm,
+  rounded up to a clean tick. When the cap already exceeds the maximum, the scale is the plain rounded maximum and
+  nothing is truncated. A truncated stem is drawn to the cap, carries a two-diagonal axis-break glyph over a white
+  gap, and prints its exact value beside the dot; the legend states that stems above the cap are truncated and
+  labelled with their value.
+- **Tool order.** `tools/compare_stat_methods.py` (decide which layer), `tools/countdist_to_npz.py` then
+  `tools/verify_ranksum_archives.py` (archive the released per-exon counts and prove they reproduce the released
+  p-values), `tools/calibrate_ranksum.py` (the supplement), `tools/build_region_lollipops_v4.py` (the figures).
+  Every one of these tools takes its roots as arguments; none carries a lab path.
