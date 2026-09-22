@@ -23,6 +23,7 @@ windows do not collapse to an underflowed zero.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import math
@@ -56,15 +57,81 @@ def load_alias(path: Path):
     return alias
 
 
+PERMUTATION_UNITS = ("row", "exon-dedupe", "cluster")
+UNIT_NOTES = {
+    "row": "Labels permuted over rMATS event ROWS. A target exon carried by several rows can be "
+           "split between the changed and background draw, which the data can never do, so the "
+           "null is narrower than the truth and the p is anti-conservative.",
+    "cluster": "Labels permuted over TARGET-EXON CLUSTERS at the observed foreground's exact "
+               "cluster-size composition, so every row of a target exon moves together and the "
+               "drawn changed set has exactly the observed number of rows.",
+    "exon-dedupe": "Duplicate target-exon rows collapsed to their first occurrence in both groups "
+                   "before ranking, then rows permuted. This changes the observed statistic, so "
+                   "the released root tables are NOT reproduced and are not cross-checked.",
+}
+
+
+def target_exon_key(exon_ids: np.ndarray):
+    """The 4-field target-exon identity of each engine row: chr:strand:exonStart:exonEnd.
+
+    The engine's fasta headers are chr:strand:exonStart:exonEnd:firstES:firstEE:secondES:secondEE,
+    so rows sharing a target exon with different flanking exons collapse to one key here.
+    Returns (keys, parsed): an identifier that is not in the engine's eight-field form is kept
+    whole and reported as unparsed, so a non-engine archive can still be calibrated row-wise but
+    can never be silently clustered.
+    """
+    out = np.empty(exon_ids.size, dtype=object)
+    parsed = True
+    for i, value in enumerate(exon_ids):
+        fields = str(value).split(":")
+        if len(fields) != 8:
+            parsed = False
+            out[i] = str(value)
+        else:
+            out[i] = ":".join(fields[:4])
+    return out, parsed
+
+
+def first_occurrence_mask(keys: np.ndarray) -> np.ndarray:
+    seen, mask = set(), np.zeros(keys.size, dtype=bool)
+    for i, key in enumerate(keys):
+        if key not in seen:
+            seen.add(key)
+            mask[i] = True
+    return mask
+
+
 class MotifModel:
     """Permutation-invariant rank scaffolding for one motif and direction."""
 
-    def __init__(self, npz_path: Path, direction: str):
+    def __init__(self, npz_path: Path, direction: str, unit: str = "row"):
+        if unit not in PERMUTATION_UNITS:
+            raise ValueError("unknown permutation unit: " + unit)
+        self.unit = unit
         with np.load(npz_path, allow_pickle=False) as data:
             fg = io.group_csr(data, direction)
             bg = io.group_csr(data, "bg")
+            fg_keys, fg_parsed = target_exon_key(np.asarray(data[direction + "_exon_id"]))
+            bg_keys, bg_parsed = target_exon_key(np.asarray(data["bg_exon_id"]))
             self.region_index = np.asarray(data["region_of_position"])
             self.position = np.asarray(data["position"])
+        self.exon_ids_parsed = bool(fg_parsed and bg_parsed)
+        if unit != "row" and not self.exon_ids_parsed:
+            raise ValueError(
+                "permutation unit {!r} needs the engine's eight-field exon identifiers; this archive "
+                "does not carry them".format(unit))
+        self.n_rows_input = (int(fg.shape[0]), int(bg.shape[0]))
+        if unit == "exon-dedupe":
+            fg_keep, bg_keep = first_occurrence_mask(fg_keys), first_occurrence_mask(bg_keys)
+            fg, bg = fg[fg_keep], bg[bg_keep]
+            fg_keys, bg_keys = fg_keys[fg_keep], bg_keys[bg_keep]
+        self.n_distinct_exons = (len(set(fg_keys)), len(set(bg_keys)))
+        shared = set(fg_keys) & set(bg_keys)
+        if shared and unit != "row":
+            raise ValueError(
+                "a target exon appears in both the changed and the background set ({} of them, e.g. {}); "
+                "cluster permutation is undefined".format(len(shared), sorted(shared)[0]))
+        self.cluster_codes = np.unique(np.concatenate([fg_keys, bg_keys]), return_inverse=True)[1]
         self.n1 = int(fg.shape[0])
         self.n0 = int(bg.shape[0])
         self.n_total = self.n1 + self.n0
@@ -138,6 +205,54 @@ def draw_selection(rng, n_total: int, n1: int, batch: int) -> np.ndarray:
     return out
 
 
+class ClusterSampler:
+    """Size-matched target-exon cluster draws: the changed set is resampled as whole exons.
+
+    A target exon is changed or background in every one of its rMATS rows, so free row permutation
+    splits a cluster that the data can never split and makes the null too narrow. Drawing the
+    observed foreground's exact cluster-size composition from the pooled cluster pool keeps the
+    drawn foreground at exactly n1 rows and conditions on that composition.
+    """
+
+    def __init__(self, codes: np.ndarray, n1: int):
+        self.n1 = int(n1)
+        order = np.argsort(codes, kind="stable")
+        boundaries = np.flatnonzero(np.diff(codes[order])) + 1
+        members = np.split(order, boundaries)
+        sizes = np.array([m.size for m in members], dtype=np.int64)
+        observed = np.unique(codes[:n1])
+        observed_rows = int(sizes[observed].sum())
+        if observed_rows != self.n1:
+            raise ValueError(
+                "the observed changed set splits a target-exon cluster: its {} clusters hold {} "
+                "rows, not {}".format(observed.size, observed_rows, self.n1))
+        observed_sizes = sizes[observed]
+        self.pool, self.need = {}, {}
+        for size in np.unique(sizes):
+            self.pool[int(size)] = np.flatnonzero(sizes == size)
+            self.need[int(size)] = int(np.sum(observed_sizes == size))
+        for size, count in self.need.items():
+            if count and self.pool[size].size < count:
+                raise ValueError(
+                    "only {} pooled clusters of size {}; the observed foreground needs {}".format(
+                        self.pool[size].size, size, count))
+        self.members = members
+        self.n_clusters_observed = int(observed.size)
+        self.n_clusters_pool = int(sizes.size)
+        self.signature = hashlib.md5(np.ascontiguousarray(codes).tobytes()).hexdigest()
+
+    def draw(self, rng, batch: int) -> np.ndarray:
+        out = np.empty((batch, self.n1), dtype=np.int32)
+        for i in range(batch):
+            chosen = [self.members[c] for size, count in self.need.items() if count
+                      for c in rng.choice(self.pool[size], count, replace=False)]
+            rows = np.concatenate(chosen)
+            if rows.size != self.n1:
+                raise ValueError("cluster draw produced {} rows, expected {}".format(rows.size, self.n1))
+            out[i] = rows
+        return out
+
+
 def calibrate(model: MotifModel, masks: dict, selection: np.ndarray, chunk: int):
     observed = statistic_maxima(model.observed_z, masks)
     exceed = {name: 0 for name in masks}
@@ -201,6 +316,8 @@ PER_MOTIF_COLUMNS = [
     "n_fg_exons", "n_bg_exons", "n_fg_carrying", "n_bg_carrying",
     "fg_proportion", "bg_proportion", "enrichment_ratio",
     "fg_mean_count", "bg_mean_count", "count_ratio",
+    "permutation_unit", "permutation_unit_status",
+    "n_fg_distinct_target_exons", "n_bg_distinct_target_exons",
     "native_q", "calibrated_q",
 ]
 CONDENSED_COLUMNS = [
@@ -242,6 +359,30 @@ def effect_at(model: MotifModel, window):
     }
 
 
+_SAMPLER_CACHE = {}
+
+
+def cluster_sampler(model: "MotifModel") -> ClusterSampler:
+    signature = hashlib.md5(np.ascontiguousarray(model.cluster_codes).tobytes()).hexdigest()
+    key = (signature, model.n1)
+    if key not in _SAMPLER_CACHE:
+        _SAMPLER_CACHE[key] = ClusterSampler(model.cluster_codes, model.n1)
+    return _SAMPLER_CACHE[key]
+
+
+def unit_record(model: "MotifModel", sampler) -> dict:
+    return {
+        "permutation_unit": model.unit,
+        "n_rows_changed": model.n1, "n_rows_background": model.n0,
+        "n_rows_changed_before_dedupe": model.n_rows_input[0],
+        "n_rows_background_before_dedupe": model.n_rows_input[1],
+        "n_distinct_target_exons_changed": model.n_distinct_exons[0],
+        "n_distinct_target_exons_background": model.n_distinct_exons[1],
+        "n_clusters_drawn": None if sampler is None else sampler.n_clusters_observed,
+        "n_clusters_pool": None if sampler is None else sampler.n_clusters_pool,
+    }
+
+
 def run_arm(args, emit):
     arm = args.arm
     counts_dir = Path(args.counts_root) / arm
@@ -267,24 +408,32 @@ def run_arm(args, emit):
     stage1 = {}
     models_meta = {}
     selection_cache = {}
+    unit_audit = {}
     started = time.perf_counter()
     for index, motif in enumerate(motifs, 1):
         table_name = motif.split(".", 1)[0]
         rbp = alias.get(table_name, table_name)
         for direction in ("up", "dn"):
-            model = MotifModel(counts_dir / (motif + ".counts.npz"), direction)
+            model = MotifModel(counts_dir / (motif + ".counts.npz"), direction,
+                               args.permutation_unit)
             masks = model.window_masks()
-            key = (direction, model.n_total, model.n1)
+            sampler = cluster_sampler(model) if args.permutation_unit == "cluster" else None
+            key = (direction, model.n_total, model.n1,
+                   sampler.signature if sampler is not None else args.permutation_unit)
             if key not in selection_cache:
                 rng = np.random.default_rng(np.random.SeedSequence(
                     [args.seed, 1, io.DIRECTION_CODE[direction]]))
-                selection_cache[key] = draw_selection(rng, model.n_total, model.n1,
-                                                      args.permutations)
+                selection_cache[key] = (sampler.draw(rng, args.permutations) if sampler is not None
+                                        else draw_selection(rng, model.n_total, model.n1,
+                                                            args.permutations))
+                unit_audit[key[:3]] = unit_record(model, sampler)
             result = calibrate(model, masks, selection_cache[key], args.chunk_size)
             stage1[(motif, direction)] = result
             models_meta[(motif, direction)] = {
                 "n1": model.n1, "n0": model.n0,
                 "argmin": {}, "effect": {}, "rbp": rbp, "table_name": table_name,
+                "n_fg_distinct": model.n_distinct_exons[0],
+                "n_bg_distinct": model.n_distinct_exons[1],
             }
             native_p = io.p_from_z(model.observed_z)
             for region_id, region in enumerate(io.REGIONS):
@@ -296,7 +445,7 @@ def run_arm(args, emit):
                 models_meta[(motif, direction)]["effect"][region] = effect_at(model, best)
                 released = roots[direction][motif][region]
                 recomputed = float(local.min())
-                if released > 0 and recomputed > 0:
+                if args.permutation_unit != "exon-dedupe" and released > 0 and recomputed > 0:
                     if abs(math.log10(recomputed) - math.log10(released)) > 1e-6:
                         raise SystemExit(
                             "stage A invariant broken for {} {} {}".format(motif, direction, region))
@@ -344,8 +493,10 @@ def run_arm(args, emit):
     for done, key in enumerate(selected, 1):
         motif, direction = key
         task_started = time.perf_counter()
-        model = MotifModel(counts_dir / (motif + ".counts.npz"), direction)
+        model = MotifModel(counts_dir / (motif + ".counts.npz"), direction,
+                           args.permutation_unit)
         masks = model.window_masks()
+        sampler = cluster_sampler(model) if args.permutation_unit == "cluster" else None
         rng = np.random.default_rng(np.random.SeedSequence(
             [args.seed, 2, io.DIRECTION_CODE[direction]]))
         exceed = {name: 0 for name in masks}
@@ -353,7 +504,8 @@ def run_arm(args, emit):
         remaining = args.refine_perms
         while remaining > 0:
             batch = min(args.chunk_size, remaining)
-            selection = draw_selection(rng, model.n_total, model.n1, batch)
+            selection = (sampler.draw(rng, batch) if sampler is not None
+                         else draw_selection(rng, model.n_total, model.n1, batch))
             maxima = statistic_maxima(model.permutation_z(selection), masks)
             for name in masks:
                 if math.isfinite(observed[name]):
@@ -409,6 +561,10 @@ def run_arm(args, emit):
                     "calib_stage_pooled": stage[(motif, direction)],
                     "calib_pooled_reason": pooled["reason"],
                     "n_fg_exons": meta["n1"], "n_bg_exons": meta["n0"],
+                    "permutation_unit": args.permutation_unit,
+                    "permutation_unit_status": args.unit_status,
+                    "n_fg_distinct_target_exons": meta["n_fg_distinct"],
+                    "n_bg_distinct_target_exons": meta["n_bg_distinct"],
                 }
                 row.update(meta["effect"][region])
                 rows.append(row)
@@ -492,6 +648,10 @@ def run_arm(args, emit):
         "smallest_calibrated_q": min((v for v in q_lookup.values() if math.isfinite(v)),
                                      default=None),
         "singleton_bh_q_floor": min(1.0, len(bh_keys) / (1.0 + args.refine_perms)),
+        "permutation_unit": args.permutation_unit,
+        "permutation_unit_status": args.unit_status,
+        "permutation_unit_audit": [dict(zip(("direction", "n_total", "n_changed"), k), **v)
+                                   for k, v in sorted(unit_audit.items())],
     }
     (out_dir / "refinement_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return out_dir, rows, condensed, report, roots, motifs
@@ -613,6 +773,14 @@ def main(argv=None) -> int:
     parser.add_argument("--refine-max-pairs", type=int, default=1000)
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument("--seed", type=int, default=149)
+    parser.add_argument("--permutation-unit", choices=list(PERMUTATION_UNITS), default="row",
+                        help="row: permute rMATS event rows (historical default). cluster: permute "
+                             "target-exon clusters at the observed size composition. exon-dedupe: "
+                             "collapse duplicate target exons first, then permute rows.")
+    parser.add_argument("--unit-status",
+                        default="permutation unit under review 2026-09-21",
+                        help="free text recorded beside every calibrated p; set to a decided status "
+                             "only once the unit question is settled")
     parser.add_argument("--positions-long", action="store_true", default=True)
     parser.add_argument("--no-positions-long", dest="positions_long", action="store_false")
     args = parser.parse_args(argv)
@@ -638,7 +806,11 @@ def main(argv=None) -> int:
         "\n".join(readout_lines(args.arm, condensed, report)) + "\n", encoding="utf-8")
     write_workbook(out_dir / (args.arm + "_calibrated_ranksum.xlsx"), {
         "README": (["field", "description"],
-                   [{"field": k, "description": v} for k, v in README_ROWS]),
+                   [{"field": k, "description": v} for k, v in README_ROWS] + [
+                       {"field": "permutation_unit",
+                        "description": UNIT_NOTES[args.permutation_unit]},
+                       {"field": "permutation_unit_status",
+                        "description": args.unit_status}]),
         "condensed_per_rbp": (CONDENSED_COLUMNS, condensed),
         "per_motif_regions": (PER_MOTIF_COLUMNS, rows),
     })
