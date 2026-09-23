@@ -5,6 +5,9 @@ RBP-RELI blue #0072B2), deepened continuously (OKLCh, hue fixed) as the signific
 to the floor (supplement: calibrated q, floor 1/(B2+1); main: raw rank-sum p, floor = 10^-(y cap));
 Okabe-Ito grey #999999 when the value is >= 0.05. The four-bin key is replaced by two colour bars.
 Everything else is v4.2.
+v4.3.1 (2026-09-23): on the q-coloured supplement the ramp ends at the smallest q observed in the arm for
+that family (RBP-level q for byRBP, motif-level q for byMotif, over the unexcluded entries), labelled
+'(floor in this arm)'; a BH q cannot reach the permutation p floor. Arms with no q < 0.05 keep the p floor.
 
 v4.2 (2026-09-22) over v4.1: the supplement reads calibration v2 (target-exon cluster permutation,
 tools/calibrate_ranksum_v2.py); by-motif colour = motif-level cluster q (family 726); by-RBP stem, rank and
@@ -55,7 +58,7 @@ SUBREGIONS = ['upstreamExon-3prime', 'upstreamExonIntron', 'upstreamIntron', 'ta
 POOLING = {'Upstream Intron': (1, 2), 'Exon Body': (3, 4), 'Downstream Intron': (5, 6)}
 RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
-FIG_VERSION = '4.3'
+FIG_VERSION = '4.3.1'
 SFX = '_v43'
 RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
@@ -724,26 +727,43 @@ def ramp_check(direction, n=256):
     return mono, ok, _to_hex(oklch_to_rgb(Lt, Ct, hf))
 
 
-def colour_floor(layer, refinement, scale):
-    """Significance value at which the ramp reaches the full hue; one value per arm x layer."""
+def colour_floor(layer, refinement, scale, q_floor=None):
+    """Significance value at which the ramp reaches the full hue.
+
+    Supplement (q): the smallest q observed in the arm for the figure's family (one value per arm x kind,
+    shared by both exclusion variants); the permutation p floor only when the arm has no q < 0.05.
+    Main (raw p): 10^-(y cap), one value per arm x layer."""
     if layer == 'calibrated_ranksum':
+        if q_floor is not None and 0 < q_floor < SIG_ALPHA:
+            return q_floor
         return 1 / (refinement['stage2_permutations'] + 1)
     return 10 ** (-float(scale['ymax']))
 
 
-def floor_label(layer, refinement, scale):
+def _fmt_q(q):
+    return f'{q:.4f}' if q >= 1e-4 else f'{q:.1e}'
+
+
+def floor_label(layer, refinement, scale, q_floor=None):
     if layer == 'calibrated_ranksum':
-        return f"≤ 1/{refinement['stage2_permutations'] + 1:,} (floor)"
+        if q_floor is not None and 0 < q_floor < SIG_ALPHA:
+            return f'≤ {_fmt_q(q_floor)} (floor in this arm)'
+        return f"≤ 1/{refinement['stage2_permutations'] + 1:,} (no q < 0.05 in this arm)"
     return f"≤ 1e−{float(scale['ymax']):g} (y cap)"
+
+
+def arm_q_floors(entries):
+    """Smallest q per family over every (unexcluded) supplement entry of one arm."""
+    return {'byRBP': min(e['_rbp_q'] for e in entries), 'byMotif': min(e['_q'] for e in entries)}
 
 
 def _hex_of(rgba):
     return '#' + ''.join(f'{round(v * 255):02X}' for v in rgba[:3])
 
 
-def draw_colour_key(fig, layer, refinement, scale, legend_top=.198):
+def draw_colour_key(fig, layer, refinement, scale, legend_top=.198, q_floor=None):
     """Two horizontal bars (included, skipped) on -log10 s from 0.05 to the floor/cap, plus the grey swatch."""
-    floor = colour_floor(layer, refinement, scale)
+    floor = colour_floor(layer, refinement, scale, q_floor)
     for d in DIRECTION_HUE:
         monotone, in_gamut, _ = ramp_check(d)
         if not (monotone and in_gamut):
@@ -780,8 +800,8 @@ def draw_colour_key(fig, layer, refinement, scale, legend_top=.198):
         x = x0 + (x1 - x0) * (-math.log10(value) - lo) / (hi - lo)
         ax.plot([x, x], [tick_top, tick_top - 4 - 15 * row], color='#333333', lw=.6, zorder=3)
         ax.text(x, tick_top - 11 - 15 * row, label, ha='center', va='center', fontsize=12)
-    ax.plot([x1, x1], [tick_top, tick_top - 4], color='#333333', lw=.6, zorder=3)
-    ax.text(x1, tick_top - 11, floor_label(layer, refinement, scale), ha='right', va='center', fontsize=12)
+    ax.plot([x1, x1], [tick_top, tick_top - 4 - 45], color='#333333', lw=.6, zorder=3)
+    ax.text(x1 - .01, tick_top - 11 - 45, floor_label(layer, refinement, scale, q_floor), ha='right', va='center', fontsize=12)
     grey_y = 18
     ax.scatter([.07], [grey_y], s=140, marker='o', color=NS_GREY, edgecolor='#333333', linewidth=.7)
     ax.text(.11, grey_y, f'{symbol} ≥ 0.05 (not significant)', fontsize=14, va='center')
@@ -1049,7 +1069,7 @@ def draw_break(ax, x, ymax):
 
 
 def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size_key, path, args, excluded=False,
-                texts=None, caveat='', target_exons=None, sensitivity=''):
+                texts=None, caveat='', target_exons=None, sensitivity='', q_floor=None):
     texts = texts or resolve_texts(args)
     fig = plt.figure(figsize=(32, 28), dpi=PNG_DPI)
     fig.text(.5, .978, LABELS[arm] + ' — skipped-exon motif map', ha='center', va='top', fontsize=27, weight='bold')
@@ -1071,7 +1091,7 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
     ymax, step = scale['ymax'], scale['step']
     truncated_rows, open_dot_rows, colour_rows = [], [], []
     axes = []
-    depth_floor = colour_floor(layer, refinement, scale)
+    depth_floor = colour_floor(layer, refinement, scale, q_floor if calibrated else None)
     for ri, d in enumerate(DIRECTIONS):
         for ci, p in enumerate(REGIONS):
             ax = fig.add_axes([.065 + ci * .305, .68 if ri == 0 else .31, .265, .175])
@@ -1170,7 +1190,7 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
         fig.text(.5, .208, lines[2], ha='center', fontsize=14, color='#555555')
     draw_legend(fig, layer, refinement, size_key, bool(open_dot_rows), excluded=excluded, kind=kind, texts=texts,
                 caveat=caveat, sensitivity=sensitivity)
-    draw_colour_key(fig, layer, refinement, scale)
+    draw_colour_key(fig, layer, refinement, scale, q_floor=q_floor if calibrated else None)
     fig.text(.5, .012, tail_line(texts, layer, refinement), ha='center', fontsize=14, color='#555555')
     report = layout_audit(fig, axes, model_artists, path, ymax, max_value)
     report.update({'layer': layer, 'kind': kind, 'arm': arm, 'excluded': excluded,
@@ -1679,6 +1699,7 @@ def main(argv=None):
         for entries in layers.values():
             attach_scores(entries, score_lookup, arm)
         scales = {layer: y_scale(entries, layer) for layer, entries in layers.items()}
+        q_floors = arm_q_floors(layers['calibrated_ranksum']) if 'calibrated_ranksum' in layers else {}
         size_rows.append({'arm': arm, **{k: v for k, v in size_key.items()}})
         power = load_power_label(arm, args.calibrated_root, counts, args.underpowered_arms)
         caveat, length_source, length_status = length_clause(arm, args.length_root)
@@ -1741,7 +1762,8 @@ def main(argv=None):
             stem = dest / (f'{arm}_SE_{kind}_{layer}' + ('' if variant == 'main' else '_' + variant))
             report = draw_figure(arm, layer, kind, panels, counts, refinement, scales[layer], power, size_key,
                                  stem, args, excluded=variant != 'main', texts=texts, caveat=caveat,
-                                 target_exons=target_exons, sensitivity=sensitivity)
+                                 target_exons=target_exons, sensitivity=sensitivity,
+                                 q_floor=q_floors.get(kind) if layer == 'calibrated_ranksum' else None)
             layouts.append(report)
             for row in report['truncated_stems']:
                 truncation_rows.append({'arm': arm, 'layer': layer, 'variant': variant, 'kind': kind,
@@ -1838,7 +1860,10 @@ def main(argv=None):
                  'value >= 0.05 = Okabe-Ito grey #999999; below 0.05 the colour runs in OKLCh with the hue fixed, '
                  'lightness and chroma linear in -log10 value, from a tint (lightness/chroma of the RBP-RELI ramp '
                  'first stop #F4E3B8 / #CDE3F2, giving #FBE0B9 / #CFE2F3) at 0.05 to the full hue at the floor. '
-                 'Value = calibrated q on the supplement (floor 1/(B2+1)) and raw rank-sum p on the main layer '
+                 'Value = calibrated q on the supplement (v4.3.1: the ramp ends at the smallest q observed in '
+                 f'the arm for the figure family: byRBP {q_floors.get("byRBP", "NA")}, byMotif '
+                 f'{q_floors.get("byMotif", "NA")}; the permutation p floor only when no q < 0.05) and raw '
+                 'rank-sum p on the main layer '
                  '(floor = 10^-(y cap), so the ramp is not driven by the extreme p). Lightness is monotone and every '
                  'ramp step is inside sRGB (checked at build time). Every drawn dot colour is read back from the '
                  'figure and audited in colour_audit_v43.tsv.',

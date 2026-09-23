@@ -47,3 +47,20 @@ def test_main_layer_floor_is_the_y_cap_and_supplement_floor_is_the_permutation_f
 def test_non_finite_significance_is_refused():
     with pytest.raises(ValueError):
         lol.significance_colour("INCLUDED", float("nan"), FLOOR)
+
+
+def test_q_ramp_ends_at_the_arm_q_floor_not_the_permutation_floor():
+    refinement, scale = {"stage2_permutations": 100_000}, {"ymax": 6}
+    assert lol.colour_floor("calibrated_ranksum", refinement, scale, 0.003) == 0.003
+    assert lol.significance_colour("SKIPPED", 0.003, 0.003) == lol.DIRECTION_HUE["SKIPPED"]
+    assert lol.floor_label("calibrated_ranksum", refinement, scale, 0.003) == "≤ 0.0030 (floor in this arm)"
+    # no q < 0.05 in the arm: fall back to the permutation p floor
+    assert lol.colour_floor("calibrated_ranksum", refinement, scale, 0.2) == FLOOR
+    assert "no q < 0.05" in lol.floor_label("calibrated_ranksum", refinement, scale, 0.2)
+    # the main layer ignores any q floor
+    assert lol.colour_floor("released_ranksum_rawP", None, {"ymax": 20}, 0.003) == pytest.approx(1e-20)
+
+
+def test_arm_q_floors_are_per_family():
+    entries = [{"_q": 0.004, "_rbp_q": 0.02}, {"_q": 0.3, "_rbp_q": 0.006}]
+    assert lol.arm_q_floors(entries) == {"byRBP": 0.006, "byMotif": 0.004}
