@@ -533,6 +533,34 @@ def tail_line(texts, layer, refinement):
                                      seed=refinement['seed'] if refinement else 'NA'))
 
 
+DEFAULT_SIDECAR_MD5 = (' The event-set md5s in the run log are identical to the audited and released-Fisher runs of '
+                      'the same arm.')
+DEFAULT_SIDECAR_LENGTH = (' The sensitivity run used the motif-level target-exon-cluster null (treatment C, BH over 756), '
+                          'not the RBP-level families; rule: order unchanged when every panel keeps Spearman(C, matched) '
+                          '>= seed-to-seed Spearman - 0.05; "fewer q<0.05 calls" when both seeds lose >= 2 calls.')
+
+
+def sidecar_statements(texts, arm, counts, gate, sens_status):
+    """The three provenance-sidecar sentences that describe the project, not the figure.
+
+    Dissertation default (no --gate-text/--direction-text/--tail-text/--tail-text-supplement/--gate-record):
+    the reli_v121 gate + rule-from-arm-suffix sentence, the released-Fisher md5 sentence and the treatment-C
+    length-run sentence, verbatim. Otherwise every sentence is derived from the same resolved text the footer
+    prints, and nothing dissertation-specific is asserted."""
+    n = (f'included {counts["n_up"]}, skipped {counts["n_dn"]}, background {counts["n_bg"]}')
+    if texts.get('source') == 'dissertation default':
+        gate_sentence = (f'- Gate {gate}, rule {arm.rsplit("_", 1)[1]}: {n}; genes absent from the DESeq2 table '
+                         f'retained ({counts["n_expr_unknown_in_fg"]} foreground / {counts["n_expr_unknown_in_bg"]} '
+                         'background events).')
+        return gate_sentence, DEFAULT_SIDECAR_MD5, DEFAULT_SIDECAR_LENGTH
+    gate_sentence = (f'- Gate (footer text from {texts["source"]}): ' + ' | '.join(gate_lines(texts, arm, counts))
+                     + f'; {n}.')
+    md5_sentence = ' Tail statement (as printed): ' + tail_line(texts, 'released_ranksum_rawP', None)
+    length_sentence = ('' if sens_status == 'not_measured' else
+                       ' The sensitivity method is the one recorded by the run under --length-root.')
+    return gate_sentence, md5_sentence, length_sentence
+
+
 def normalise_region(name):
     return re.sub('[-_]', '', name).lower()
 
@@ -1780,6 +1808,7 @@ def main(argv=None):
             sources.append(v31_tsv)
         if has_methods:
             sources.append(Path(args.method_comparison))
+        side_gate, side_md5, side_length = sidecar_statements(texts, arm, counts, args.gate, sens_status)
         prov = [f'# {arm} figure provenance — figure version {FIG_VERSION} (rank-sum layers)',
                 '',
                 '- Scope: Homo sapiens / GRCh38 (hg38) / GENCODE v49; skipped-exon (SE) events only. '
@@ -1796,13 +1825,10 @@ def main(argv=None):
                 'the gap recorded in figures_manifest_v43.tsv.',
                 f'- Layers skipped for this arm: '
                 f'{", ".join(s["layer"] for s in skipped if s["arm"] == arm) or "none"}.',
-                f'- Gate {args.gate}, rule {arm.rsplit("_", 1)[1]}: included {counts["n_up"]}, '
-                f'skipped {counts["n_dn"]}, background {counts["n_bg"]}; genes absent from the DESeq2 table retained '
-                f'({counts["n_expr_unknown_in_fg"]} foreground / {counts["n_expr_unknown_in_bg"]} background events).',
+                side_gate,
                 f"- MAIN layer released_ranksum_rawP: authors' released rMAPS3 at commit {RELEASED_COMMIT}, "
                 f'--stat-method {STAT_METHOD}; raw regional-minimum p read verbatim from '
-                'pVal.{up,dn}.vs.bg.RNAmap.txt. No adjustment, no ratio, constant dot size. The event-set md5s in the '
-                'run log are identical to the audited and released-Fisher runs of the same arm.',
+                'pVal.{up,dn}.vs.bg.RNAmap.txt. No adjustment, no ratio, constant dot size.' + side_md5,
                 f'- Dot size on BOTH layers = count_ratio from {size_key["source"]} = fg_mean_count / '
                 'bg_mean_count, the released engine\'s own motif score (hits per event per 50-nt window, changed '
                 'events divided by background events; the counted unit is the rMATS SE row, not the distinct '
@@ -1847,10 +1873,7 @@ def main(argv=None):
                      '- Length-matched sensitivity clause: "'
                      + (sensitivity or 'none drawn (arm not in the length-matched run)') + '"; '
                      + sens_status + '; source '
-                     + (str(sens_source) if sens_status != 'not_measured' else 'none') + '. '
-                     'The sensitivity run used the motif-level target-exon-cluster null (treatment C, BH over 756), '
-                     'not the RBP-level families; rule: order unchanged when every panel keeps Spearman(C, matched) '
-                     '>= seed-to-seed Spearman - 0.05; "fewer q<0.05 calls" when both seeds lose >= 2 calls.']
+                     + (str(sens_source) if sens_status != 'not_measured' else 'none') + '.' + side_length]
         if crosschecked:
             prov.append(f'- Cross-check: the native rank-sum p of all {crosschecked} pooled tests in the calibration '
                         'summary equals the released root table value to a relative tolerance of 1e-9, so both layers '

@@ -95,6 +95,22 @@ def test_single_layer_main_draws_the_released_layer_with_overridden_text(tmp_pat
     assert "TEST GATE n=20" in svg and "TEST DIRECTION" in svg
     assert "TEST TAIL " + skill.git_revision(ROOT)[:7] in svg
     assert "use for RBP ORDER only" in svg
+    sidecar = (figures / "QKI_KO_T" / "QKI_KO_T_figure_provenance_v43.md").read_text(encoding="utf-8")
+    assert "TEST GATE n=20" in sidecar and "released-Fisher" not in sidecar and "treatment C" not in sidecar
     manifest = (figures / "figures_manifest_v43.tsv").read_text(encoding="utf-8")
     assert "calibrated_ranksum" in manifest, "the skipped supplement must be recorded, not silently dropped"
     assert (figures / "index.html").is_file()
+
+
+def test_sidecar_statements_follow_the_text_flags_and_default_to_the_dissertation():
+    default = lol.sidecar_statements(lol.resolve_texts(text_args()), "QKI_KO_B", COUNTS,
+                                     "persample10_bm50_bgfdr0.5", "not_measured")
+    assert default[0].startswith("- Gate persample10_bm50_bgfdr0.5, rule B: included 20")
+    assert default[1] == lol.DEFAULT_SIDECAR_MD5 and default[2] == lol.DEFAULT_SIDECAR_LENGTH
+    texts = lol.resolve_texts(text_args(gate_text="jc10 gate n={n_up}", tail_text="TAIL {commit}"))
+    gate, md5, length = lol.sidecar_statements(texts, "osd258_flight_vs_ground", COUNTS, "g", "not_measured")
+    joined = gate + md5 + length
+    assert "jc10 gate n=20" in gate and "rule" not in gate and "DESeq2" not in gate
+    assert "released-Fisher" not in joined and "treatment C" not in joined
+    assert md5 == " Tail statement (as printed): TAIL abc1234" and length == ""
+    assert "treatment C" not in lol.sidecar_statements(texts, "x_A", COUNTS, "g", "measured_order_unchanged")[2]
