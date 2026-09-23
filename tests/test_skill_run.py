@@ -22,7 +22,7 @@ def parse(*argv):
     return skill.build_parser().parse_args(list(argv))
 
 
-BASE = ("--mode", "quick", "--arm", "A1", "--out", "out")
+BASE = ("--mode", "quick", "--arm", "A1", "--out", "out", "--no-figures")
 
 
 # ------------------------------------------------------------------ argument logic
@@ -411,3 +411,184 @@ def test_full_mode_refuses_the_audited_engine(tmp_path):
                         "--engine", "audited"], tmp_path)
     assert result.returncode == 2
     assert "--engine released" in result.stderr
+
+
+# ------------------------------------------------------------------ quick-mode figures
+FIG_ARGS = ("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o", "--up", "u", "--dn", "d",
+            "--bg", "b")
+
+
+def test_figures_need_an_arm_rule_suffix_and_a_gate_record():
+    with pytest.raises(ValueError, match="<NAME>_<RULE>"):
+        skill.validate(parse("--mode", "quick", "--arm", "NOSUFFIX", "--out", "o",
+                             "--up", "u", "--dn", "d", "--bg", "b", "--gate-counts", "c.json"))
+    with pytest.raises(ValueError, match="--gate-counts"):
+        skill.validate(parse(*FIG_ARGS))
+    skill.validate(parse(*FIG_ARGS, "--gate-counts", "c.json"))
+    skill.validate(parse(*FIG_ARGS, "--no-figures"))
+    skill.validate(parse("--mode", "quick", "--arm", "NOSUFFIX", "--out", "o", "--up", "u",
+                         "--dn", "d", "--bg", "b", "--stat-method", "fisher"))
+    with pytest.raises(ValueError, match="for pre-split inputs"):
+        skill.validate(parse("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o",
+                             "--rmats-se", "se.txt", "--filter", "f.json",
+                             "--gate-counts", "c.json"))
+
+
+def test_figures_are_skipped_with_a_reason_off_the_released_rank_sum_layer():
+    args = parse(*FIG_ARGS, "--stat-method", "fisher")
+    assert "--stat-method fisher" in skill.figure_skip_reason(args, {"verified": False})
+    args = parse(*FIG_ARGS)
+    assert "verified count archives" in skill.figure_skip_reason(args, {"verified": False,
+                                                                        "reason": "x"})
+    assert skill.figure_skip_reason(args, {"verified": True}) == ""
+
+
+def test_gate_record_must_match_the_input_event_counts(synthetic, tmp_path):  # noqa: F811
+    _, genome_root = synthetic
+    paths = input_paths(tmp_path)
+    gate = tmp_path / "counts.json"
+    gate.write_text(json.dumps({"n_up": 1, "n_dn": 1, "n_bg": 1, "n_expr_unknown_in_fg": 0,
+                                "n_expr_unknown_in_bg": 3}))
+    args = parse("--mode", "quick", "--arm", "S_A", "--out", str(tmp_path / "o"),
+                 "--up", str(paths["up"]), "--dn", str(paths["dn"]), "--bg", str(paths["bg"]),
+                 "--genome-root", str(genome_root), "--genome", "synthetic",
+                 "--gate-counts", str(gate))
+    (tmp_path / "o").mkdir()
+    skill.prepare_inputs(args, tmp_path / "o", lambda m: None, {})
+    record = json.loads((tmp_path / "o" / "event_counts.json").read_text())
+    assert record["n_expr_unknown_in_bg"] == 3
+    assert record["gate_counts_source"] == str(gate.resolve())
+    gate.write_text(json.dumps({"n_up": 2, "n_dn": 1, "n_bg": 1, "n_expr_unknown_in_fg": 0,
+                                "n_expr_unknown_in_bg": 3}))
+    (tmp_path / "o2").mkdir()
+    with pytest.raises(ValueError, match="n_up=2 disagrees"):
+        skill.prepare_inputs(args, tmp_path / "o2", lambda m: None, {})
+
+
+def fork_motif_keys():
+    """Every motif key the released engine emits for the fork's own data/ motif tables."""
+    import csv
+    keys = []
+    with open(ROOT / "data" / "knownMotifs.human.mouse.txt", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            keys.append(f"{row['Protein_name']}.{row['regularExpression']}")
+    with open(ROOT / "data" / "ESRP.like.motif.txt", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            keys.append(f"{row['name']}.{row['motif']}")
+    return keys
+
+
+def fork_data_engine_run(tmp_path, arm="QKI_KO_T"):
+    """A released-layout engine run over the fork's data/ motif tables with QKI planted first
+    in INCLUDED x Upstream Intron and SKIPPED x Downstream Intron."""
+    out = tmp_path / "run"
+    engine = out / "engine" / arm
+    engine.mkdir(parents=True)
+    counts_root = out / "counts"
+    (counts_root / arm).mkdir(parents=True)
+    motifs = sorted(fork_motif_keys())
+    rng = np.random.default_rng(149)
+    per_region = 4
+    n_windows = per_region * len(io.REGIONS)
+    region_index = np.repeat(np.arange(len(io.REGIONS), dtype=np.int8), per_region)
+    position = np.tile(np.arange(per_region, dtype=np.int32), len(io.REGIONS))
+    roots = {"up": {}, "dn": {}}
+    for motif in motifs:
+        store = {"schema_version": np.asarray(io.SCHEMA_VERSION), "arm": np.asarray(arm),
+                 "motif": np.asarray(motif), "region_name": np.asarray(io.REGIONS, dtype="U"),
+                 "region_of_position": region_index, "position": position}
+        qki = motif.startswith("QKI.")
+        for group, n_rows in (("up", 20), ("dn", 18), ("bg", 200)):
+            rate = 0.8 if qki and group != "bg" else 0.2
+            matrix = rng.poisson(rate, size=(n_rows, n_windows)).astype(np.int16)
+            store[group + "_exon_id"] = np.asarray(
+                ["chr1:+:{}:{}:1:2:3:4".format(1000 + i, 1100 + i) for i in range(n_rows)],
+                dtype="U")
+            io.pack_group(store, group, matrix)
+        np.savez_compressed(counts_root / arm / (motif + ".counts.npz"), **store)
+        for direction in ("up", "dn"):
+            roots[direction][motif] = {r: float(10.0 ** -rng.uniform(0.0, 4.0)) for r in io.REGIONS}
+        if qki:
+            roots["up"][motif]["UpstreamIntron"] = 1e-12
+            roots["dn"][motif]["DownstreamIntron"] = 1e-11
+    for direction in ("up", "dn"):
+        with open(engine / f"pVal.{direction}.vs.bg.RNAmap.txt", "w", newline="\n",
+                  encoding="utf-8") as handle:
+            handle.write("\t".join(["RBP"] + [io.ROOT_COLUMNS[r] for r in io.REGIONS]) + "\n")
+            for motif in motifs:
+                handle.write("\t".join([motif] + [repr(roots[direction][motif][r])
+                                                  for r in io.REGIONS]) + "\n")
+    (out / "engine" / f"{arm}_command.log").write_text(
+        f"set={arm} engine=released ({ROOT} @ {skill.git_revision(ROOT)}) stat=mannwhitney\n"
+        "exit=0 wall_s=1\n", encoding="utf-8")
+    (out / "event_counts.json").write_text(json.dumps(
+        {"n_up": 20, "n_dn": 18, "n_bg": 200, "n_expr_unknown_in_fg": 0,
+         "n_expr_unknown_in_bg": 2}), encoding="utf-8")
+    alias = skill.load_alias(ROOT / "data" / "rbp_alias_hgnc_2026-09-17.tsv")
+    names = {m.split(".", 1)[0] for m in motifs if not m.startswith("motif_")}
+    symbols = sorted({alias.get(n, n) for n in names} | set(alias.values()))
+    gtf = tmp_path / "genes.gtf"
+    gtf.write_text("".join(
+        f'chr1\tT\tgene\t1\t2\t.\t+\t.\tgene_id "ENSG{i:011d}.1"; gene_name "{s}";\n'
+        for i, s in enumerate(symbols)), encoding="utf-8")
+    (tmp_path / "splice.txt").write_text("SRSF1\nSNRPA\n", encoding="utf-8")
+    (tmp_path / "broad.txt").write_text("PTBP1\nHNRNPC\n", encoding="utf-8")
+    return out, engine, counts_root, roots, motifs, alias, gtf
+
+
+def build_fork_figures(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    out, engine, counts_root, roots, motifs, alias, gtf = fork_data_engine_run(tmp_path)
+    args = parse("--mode", "quick", "--arm", "QKI_KO_T", "--out", str(out),
+                 "--up", "u", "--dn", "d", "--bg", "b", "--gate-counts", "c.json",
+                 "--engine-root", str(ROOT), "--gtf", str(gtf),
+                 "--spliceosome-list", str(tmp_path / "splice.txt"),
+                 "--broad-binders-list", str(tmp_path / "broad.txt"),
+                 "--positive-control", "QKI")
+    scores = {m: skill.motif_scores(counts_root, args.arm, m) for m in motifs}
+    result = skill.build_quick_figures(args, out, engine, roots, motifs, scores, alias,
+                                       ROOT / "data" / "knownMotifs.human.mouse.txt",
+                                       ROOT / "data" / "ESRP.like.motif.txt", lambda m: None)
+    return args, out, engine, result
+
+
+def test_quick_mode_draws_the_four_main_layer_figures_on_the_fork_data_tables(tmp_path):
+    args, out, engine, result = build_fork_figures(tmp_path)
+    figures = out / "figures"
+    expected = [f"QKI_KO_T_SE_{kind}_released_ranksum_rawP{variant}"
+                for kind in ("byRBP", "byMotif") for variant in ("", "_noSpliceosome_noBroad")]
+    for stem in expected:
+        for suffix in (".png", ".svg"):
+            path = figures / (stem + suffix)
+            assert path.is_file() and path.stat().st_size > 0, path
+    assert sorted(p.name for p in result["figures"]) == sorted(
+        s + x for s in expected for x in (".png", ".svg"))
+    assert not list(figures.rglob("*calibrated*")), "quick mode must never draw the calibrated layer"
+    svg = (figures / (expected[0] + ".svg")).read_text(encoding="utf-8")
+    assert "use for RBP ORDER only" in svg
+    assert "n events (rMATS SE rows) included=20 / skipped=18 / background=200" in svg
+    assert "0 foreground / 2 background events" in svg, "the footer must print the gate record"
+    assert "Dot size = motif-score ratio" in svg
+    controls = result["controls"]
+    assert len(controls) == 8 and all(r["pass"] for r in controls)
+    assert (figures / "positive_control_audit.tsv").is_file()
+    header = (figures / "motif_scores" / "QKI_KO_T" / "per_motif_regions.tsv").read_text(
+        encoding="utf-8").splitlines()[0]
+    assert "calibrated" not in header and "count_ratio" in header
+    index = skill.write_index(args, out, engine, fake_counts(), [], {"verified": True}, [], result)
+    html = index.read_text(encoding="utf-8")
+    for stem in expected:
+        assert f"figures/{stem}.png" in html
+    assert "use them for the RBP ORDER only" in html
+
+
+def test_quick_figures_are_byte_identical_across_two_builds(tmp_path):
+    import hashlib
+    _, _, _, first = build_fork_figures(tmp_path / "a")
+    _, _, _, second = build_fork_figures(tmp_path / "b")
+
+    def digest(path):
+        return hashlib.md5(path.read_bytes()).hexdigest()
+
+    assert [p.name for p in first["figures"]] == [p.name for p in second["figures"]]
+    assert [digest(p) for p in first["figures"]] == [digest(p) for p in second["figures"]]

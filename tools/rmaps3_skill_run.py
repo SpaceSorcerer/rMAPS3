@@ -3,9 +3,10 @@
 
 quick  runs the engine exactly as the lab launchers do, converts the countDist temporaries into
        per-motif npz archives, proves those archives reproduce the engine's own root tables,
-       deletes only the verified temporaries, and writes quick_summary.xlsx + index.html.
+       deletes only the verified temporaries, and writes quick_summary.xlsx, the main-layer
+       region lollipops (released rank-sum raw p only; --no-figures skips them) + index.html.
 full   adds the lab layers: Westfall-Young calibration, foreground-bootstrap rank stability and
-       the version 4.1 region lollipops with their rank workbook.
+       the version 4.1 region lollipops for both layers with their rank workbook.
 
 Nothing here recomputes or rewrites an engine output. Every path default is a lab convenience and
 is overridable by a flag.
@@ -200,10 +201,19 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
         renamed = sum(v["count"] for v in counts[key]["renamed"].values())
         log(f"events {key}={counts[key]['n_events']} contigs_renamed={renamed}")
     summary = {key: counts[key]["n_events"] for key in counts}
-    (out / "event_counts.json").write_text(json.dumps(
-        {"n_up": summary["up"], "n_dn": summary["dn"], "n_bg": summary["bg"],
-         "n_expr_unknown_in_fg": 0, "n_expr_unknown_in_bg": 0,
-         "source": {k: str(v) for k, v in sources.items()}}, indent=2) + "\n", encoding="utf-8")
+    record = {"n_up": summary["up"], "n_dn": summary["dn"], "n_bg": summary["bg"],
+              "n_expr_unknown_in_fg": None, "n_expr_unknown_in_bg": None,
+              "source": {k: str(v) for k, v in sources.items()}}
+    if args.gate_counts:
+        gate = json.loads(Path(args.gate_counts).read_text(encoding="utf-8-sig"))
+        for key, direction in (("n_up", "up"), ("n_dn", "dn"), ("n_bg", "bg")):
+            if int(gate[key]) != summary[direction]:
+                raise ValueError(f"--gate-counts {key}={gate[key]} disagrees with the "
+                                 f"{direction} input ({summary[direction]} events)")
+        record.update({k: int(gate[k]) for k in ("n_expr_unknown_in_fg", "n_expr_unknown_in_bg")})
+        record["gate_counts_source"] = str(Path(args.gate_counts).resolve())
+        log(f"gate record {args.gate_counts}: event counts match the inputs")
+    (out / "event_counts.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if args.rmats_se:
         built = json.loads((out / "event_sets" / "counts.json").read_text())
         (out / "event_counts.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf-8")
@@ -368,14 +378,20 @@ def motif_scores(counts_root, arm: str, motif: str):
     return out
 
 
-def quick_tables(args, engine_out: Path, counts_root, counts: dict, alias: dict):
-    """One row per motif per direction, plus the per-RBP best-motif panel ranking."""
+def read_roots(engine_out: Path):
     roots = {d: io.read_root_table(engine_out / f"pVal.{d}.vs.bg.RNAmap.txt")
              for d in ("up", "dn")}
     motifs = sorted(roots["up"])
     if sorted(roots["dn"]) != motifs:
         raise ValueError("The two root tables do not carry the same motifs")
-    scores = {m: motif_scores(counts_root, args.arm, m) for m in motifs}
+    return roots, motifs
+
+
+def quick_tables(args, engine_out: Path, counts_root, counts: dict, alias: dict, scores=None):
+    """One row per motif per direction, plus the per-RBP best-motif panel ranking."""
+    roots, motifs = read_roots(engine_out)
+    if scores is None:
+        scores = {m: motif_scores(counts_root, args.arm, m) for m in motifs}
     n_events = {"up": counts["up"]["n_events"], "dn": counts["dn"]["n_events"],
                 "bg": counts["bg"]["n_events"]}
     per_motif = {"up": [], "dn": []}
@@ -522,8 +538,192 @@ def positive_control(rbp_rows, symbol: str, panels) -> list:
     return out
 
 
+# ------------------------------------------------------------------ quick-mode figures
+MAIN_LAYER = "released_ranksum_rawP"
+FIGURE_KINDS = ("byRBP", "byMotif")
+FIGURE_VARIANTS = ("main", "noSpliceosome_noBroad")
+SCORE_TABLE_COLUMNS = [
+    "arm", "motif_key", "RBP", "rbp_table_name", "direction", "direction_label", "region",
+    "pooled_region", "plot", "native_ranksum_p", "argmin_window_position",
+    "n_fg_carrying", "n_bg_carrying", "fg_proportion", "bg_proportion", "enrichment_ratio",
+    "fg_mean_count", "bg_mean_count", "count_ratio",
+]
+
+
+def figures_wanted(args) -> bool:
+    return args.mode == "quick" and not args.no_figures
+
+
+def figure_skip_reason(args, conversion) -> str:
+    if args.engine != "released" or args.stat_method != "mannwhitney":
+        return ("the main-layer figures draw the released engine's rank-sum p; this run is "
+                f"--engine {args.engine} --stat-method {args.stat_method}")
+    if not conversion.get("verified"):
+        return "dot size needs verified count archives; " + (conversion.get("reason") or "not verified")
+    return ""
+
+
+def figure_stem(arm: str, kind: str, variant: str) -> str:
+    return f"{arm}_SE_{kind}_{MAIN_LAYER}" + ("" if variant == "main" else "_" + variant)
+
+
+def cell(value) -> str:
+    if value is None:
+        return "NA"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, float):
+        return repr(value) if math.isfinite(value) else "NA"
+    return str(value)
+
+
+def write_score_table(path: Path, arm: str, roots: dict, motifs: list, scores: dict,
+                      alias: dict) -> int:
+    """The tool's own per-sub-region motif scores, in the column names the figure builder reads.
+
+    Released-layer columns only: no calibrated p, no q. The builder sizes dots by count_ratio and
+    skips its calibrated layer because no refinement_report.json sits beside this table.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\t".join(SCORE_TABLE_COLUMNS) + "\n")
+        for motif in motifs:
+            table_name = motif.split(".", 1)[0]
+            for direction in ("up", "dn"):
+                for region in io.REGIONS:
+                    score = (scores.get(motif) or {}).get((direction, region))
+                    if score is None:
+                        raise ValueError(f"No motif score for {motif} {direction} {region}")
+                    pool = io.REGION_TO_POOL[region]
+                    row = {"arm": arm, "motif_key": motif, "RBP": alias.get(table_name, table_name),
+                           "rbp_table_name": table_name, "direction": direction,
+                           "direction_label": io.DIRECTION_LABEL[direction], "region": region,
+                           "pooled_region": pool, "plot": pool in io.PLOT_POOLS,
+                           "native_ranksum_p": roots[direction][motif][region],
+                           "argmin_window_position": score["position"],
+                           **{k: score[k] for k in SCORE_TABLE_COLUMNS[11:]}}
+                    handle.write("\t".join(cell(row[c]) for c in SCORE_TABLE_COLUMNS) + "\n")
+                    n += 1
+    return n
+
+
+def figure_positive_control(selections: dict, arm: str, symbol: str, panels) -> list:
+    """Rank-1 check on every drawn main-layer panel: both kinds, both exclusion variants."""
+    out = []
+    for variant in FIGURE_VARIANTS:
+        for kind in FIGURE_KINDS:
+            drawn_panels = selections[(variant, kind)]
+            for label, pool in panels:
+                drawn = drawn_panels.get((label, pool), [])
+                first = drawn[0] if drawn else None
+                rank = next((i for i, r in enumerate(drawn, 1) if r["_label"] == symbol), None)
+                out.append({"arm": arm, "layer": MAIN_LAYER, "variant": variant, "kind": kind,
+                            "panel": f"{label} x {pool}", "symbol": symbol,
+                            "first": first["_label"] if first else None,
+                            "first_p": first["_p"] if first else None,
+                            "first_motif": first["motif_key"] if first else None,
+                            "symbol_rank_in_drawn_top_n": rank,
+                            "pass": bool(first is not None and first["_label"] == symbol)})
+    return out
+
+
+def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: list,
+                        scores: dict, alias: dict, known: Path, additional, log) -> dict:
+    """Main-layer region lollipops (released rank-sum, raw p) drawn by the v4.1 builder's own
+    functions: naming, released-table reader, motif scores, shared y-scale, panel selection and
+    draw_figure with its layout audit. The builder's main() is not used because its
+    rank-comparison step needs a second layer or a v3.1 archive; nothing in it is modified."""
+    import matplotlib.pyplot as plt
+    import build_region_lollipops_v4 as lol
+    arm = args.arm
+    figures = out / "figures"
+    score_root = figures / "motif_scores"
+    score_table = score_root / arm / "per_motif_regions.tsv"
+    n_rows = write_score_table(score_table, arm, roots, motifs, scores, alias)
+    (score_root / arm / "command.log").write_text(
+        f"source=count archives {out / 'counts' / arm} (verified against the root tables)\n"
+        f"writer={Path(__file__).resolve()} rows={n_rows} layer=released motif scores only\n"
+        "exit=0\n", encoding="utf-8")
+    log(f"wrote {score_table} ({n_rows} rows; released-layer motif scores, no calibrated columns)")
+    plt.rcParams.update({"font.family": "Arial", "svg.fonttype": "none",
+                         "svg.hashsalt": "rmaps-v4", "pdf.fonttype": 42})
+    if args.arm_label:
+        lol.LABELS[arm] = args.arm_label
+    lol.LABELS.setdefault(arm, arm.replace("_", " "))
+    mappings, naming_rows, naming_stats = lol.load_naming(
+        known, additional or lol.ESRP_TABLE, args.gtf, args.alias_table)
+    aliases = naming_stats["alias_mappings"]
+    lists = {"spliceosome_census": lol.load_exclusion_list(args.spliceosome_list),
+             "broad_binders": lol.load_exclusion_list(args.broad_binders_list)}
+    lists = {k: {aliases.get(s, s) for s in v} for k, v in lists.items()}
+    counts, _ = lol.gate_counts(None, arm, None, out / "event_counts.json")
+    engine_root = Path(args.engine_root or DEFAULT_RELEASED_ENGINE)
+    entries, _, n_motifs = lol.released_entries(arm, engine_out.parent, mappings,
+                                                git_revision(engine_root)[:7], args.stat_method)
+    exclusion_rows, dropped = lol.exclusion_audit(arm, entries, lists)
+    lookup, size_key = lol.load_motif_scores(arm, score_root)
+    lol.attach_scores(entries, lookup, arm)
+    scale = lol.y_scale(entries, MAIN_LAYER)
+    power = None
+    if arm in set(args.underpowered_arms):
+        power = {"label": f"underpowered: {counts['n_up']} included and {counts['n_dn']} skipped events",
+                 "adequate": False}
+    selections, audits, layouts, built = {}, [], [], []
+    for variant in FIGURE_VARIANTS:
+        chosen = entries if variant == "main" else [e for e in entries
+                                                    if e["_exclusion_symbol"] not in dropped]
+        for kind in FIGURE_KINDS:
+            panels = lol.select_panels(chosen, MAIN_LAYER, kind, args.top_n)
+            selections[(variant, kind)] = panels
+            for (direction, region), rows in panels.items():
+                for rank, r in enumerate(rows, 1):
+                    audits.append({"arm": arm, "layer": MAIN_LAYER, "variant": variant, "type": kind,
+                                   "direction": direction, "pooled_region": region, "rank": rank,
+                                   "label": r["_label"], "figure_tick_label": r["_tick"],
+                                   "source_rbp": r["RBP"], "motif_key": r["motif_key"],
+                                   "selected_sub_region": r["region"], "p": r["_p"],
+                                   "count_ratio": r["_count_ratio"],
+                                   "k_motifs_p_lt_0.05": r["_k"], "n_motifs_in_group": r["_n"],
+                                   "hgnc_symbol": r["_hgnc_symbol"],
+                                   "naming_action": r["_naming_action"]})
+            stem = figures / figure_stem(arm, kind, variant)
+            report = lol.draw_figure(arm, MAIN_LAYER, kind, panels, counts, None, scale, power,
+                                     size_key, stem, args, excluded=variant != "main")
+            layouts.append(report)
+            built += [Path(str(stem) + ".png"), Path(str(stem) + ".svg")]
+    for path in built:
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f"Figure missing after drawing: {path}")
+    lol.write_tsv(figures / "selection_audit.tsv", list(audits[0]), audits)
+    lol.write_tsv(figures / "exclusion_audit.tsv", list(exclusion_rows[0]), exclusion_rows)
+    lol.write_tsv(figures / "naming_audit.tsv",
+                  ["table_name", "hgnc_symbol", "source", "evidence", "ambiguity_note", "n_motifs",
+                   "merged_into"], naming_rows)
+    (figures / "layout_report.json").write_text(json.dumps(
+        {"figure_version": lol.FIG_VERSION, "layer": MAIN_LAYER, "n_motifs": n_motifs,
+         "y_scale": scale, "size_key": size_key, "dropped_in_noSpliceosome_noBroad": sorted(dropped),
+         "figures": layouts}, indent=2, default=str) + "\n", encoding="utf-8")
+    result = {"figures": built, "score_table": score_table, "controls": [],
+              "audits": [figures / n for n in ("selection_audit.tsv", "exclusion_audit.tsv",
+                                               "naming_audit.tsv", "layout_report.json")]}
+    if args.positive_control:
+        panels = [tuple(part.split(":", 1)) for part in args.positive_control_panels.split(",")]
+        controls = figure_positive_control(selections, arm, args.positive_control, panels)
+        lol.write_tsv(figures / "positive_control_audit.tsv", list(controls[0]), controls)
+        result["controls"] = controls
+        for row in controls:
+            log("figure positive control {} {} {} {}: first={} -> {}".format(
+                row["symbol"], row["variant"], row["kind"], row["panel"], row["first"],
+                "PASS" if row["pass"] else "FAIL"))
+    log(f"figures: {len(built)} files in {figures}; y limit {scale['ymax']:g}, "
+        f"{sum(r['n_stems_truncated'] for r in layouts)} truncated stems, layout audit passed")
+    return result
+
+
 # ------------------------------------------------------------------ index page
-def write_index(args, out: Path, engine_out: Path, counts, controls, conversion, extras) -> Path:
+def write_index(args, out: Path, engine_out: Path, counts, controls, conversion, extras,
+                figures=None) -> Path:
     import html as html_mod
 
     def esc(value):
@@ -570,6 +770,40 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
                          f"<td>{esc(row['symbol_rank'])}</td>"
                          f"<td class=\"{klass}\">{'PASS' if row['pass'] else 'FAIL'}</td></tr>")
         parts.append("</table>")
+    if figures is not None and figures.get("figures"):
+        parts.append(
+            "<h2>Main-layer region lollipops</h2>"
+            "<p><b>What they show:</b> the authors' released rMAPS3 rank-sum p, raw, exactly as the "
+            "root tables report it, reduced to the smallest p per pooled region. Stems are "
+            "−log10 p, dot colour bins the same raw p, dot size is the tool's own motif-score "
+            "ratio (changed ÷ background hits per event per 50-nt window). Included panels rise, "
+            "skipped panels hang down, all six share one y-scale, and the footer gives n events.</p>"
+            "<p><b>What they do not show:</b> a calibrated p, a q-value or any multiple-testing "
+            "adjustment. The p is anti-conservative; <b>use them for the RBP ORDER only</b>. "
+            "The calibrated supplement is built by <code>--mode full</code>.</p>"
+            '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">')
+        for path in figures["figures"]:
+            if path.suffix != ".png":
+                continue
+            svg = path.with_suffix(".svg")
+            parts.append(f'<div><a href="{rel(path)}"><img loading="lazy" src="{rel(path)}" '
+                         f'alt="{esc(path.name)}"></a><br>{esc(path.stem)} · '
+                         f'<a href="{rel(svg)}">editable SVG</a></div>')
+        parts.append("</div>")
+        links = [("selection audit: every drawn row, its motif, sub-region, p and ratio",
+                  out / "figures" / "selection_audit.tsv"),
+                 ("layout, y-scale, dot-size and truncation record", out / "figures" / "layout_report.json"),
+                 ("exclusions applied in the _noSpliceosome_noBroad variant",
+                  out / "figures" / "exclusion_audit.tsv"),
+                 ("HGNC naming audit", out / "figures" / "naming_audit.tsv"),
+                 ("motif-score table used for dot size", figures["score_table"])]
+        if figures.get("controls"):
+            links.insert(0, ("figure positive-control audit",
+                             out / "figures" / "positive_control_audit.tsv"))
+        parts.append("<ul>" + "".join(f'<li><a href="{rel(t)}">{esc(l)}</a></li>'
+                                      for l, t in links) + "</ul>")
+    elif figures is not None and figures.get("skipped"):
+        parts.append(f"<h2>Main-layer region lollipops</h2><p>Not built: {esc(figures['skipped'])}</p>")
     maps_dir = engine_out / "maps"
     if maps_dir.is_dir():
         pngs = sorted(maps_dir.glob("*.png"))
@@ -708,6 +942,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-temp", action="store_true",
                    help="keep the countDist temporaries even after they verify")
     p.add_argument("--gate-note", default=None, help="free text describing the gate, for the README")
+    p.add_argument("--gate-counts", default=None,
+                   help="the gate record counts.json for pre-split inputs (n_up, n_dn, n_bg, "
+                        "n_expr_unknown_in_fg/bg); its event counts must match the inputs")
+    p.add_argument("--no-figures", action="store_true",
+                   help="quick mode: skip the main-layer region lollipops")
+    p.add_argument("--arm-label", default=None, help="figure title for an arm the builder does not name")
     # full mode
     p.add_argument("--calib-unit", choices=("row", "exon-dedupe", "cluster"), default="cluster")
     p.add_argument("--calib-unit-decided", action="store_true",
@@ -747,6 +987,17 @@ def validate(args) -> None:
     if args.mode == "full" and args.engine != "released":
         raise ValueError("--mode full builds the authors' layer plus its calibration, so it needs "
                          "--engine released")
+    draws = args.mode == "full" or (figures_wanted(args) and args.engine == "released"
+                                    and args.stat_method == "mannwhitney")
+    if draws and "_" not in args.arm:
+        raise ValueError("the figure builder reads the gate rule from the text after the arm's last "
+                         "'_' (e.g. QKI_KO_B -> rule B); name the arm <NAME>_<RULE> or pass --no-figures")
+    if draws and presplit and not args.gate_counts:
+        raise ValueError("the figure footer prints the gate's expression-unknown event counts, which "
+                         "pre-split files do not carry; pass --gate-counts <counts.json> (e.g. "
+                         r"F:\rMAPS\event_sets\<ARM>\<gate>_rule<R>\counts.json) or --no-figures")
+    if args.gate_counts and not presplit:
+        raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
                 "refine_perms", "bootstraps", "top_n"):
         if getattr(args, key) < 1:
@@ -795,7 +1046,10 @@ def main(argv=None) -> int:
         engine_out, wall, engine_root, known, additional = run_engine(args, paths, out, log, env)
         counts_root, conversion = convert_and_verify(args, engine_out, out, log, env)
         alias = load_alias(Path(args.alias_table))
-        per_motif, rbp_rows, motifs = quick_tables(args, engine_out, counts_root, counts, alias)
+        roots, root_motifs = read_roots(engine_out)
+        scores = {m: motif_scores(counts_root, args.arm, m) for m in root_motifs}
+        per_motif, rbp_rows, motifs = quick_tables(args, engine_out, counts_root, counts, alias,
+                                                   scores=scores)
         sheets = {
             "README": (["field", "description"],
                        readme_rows(args, engine_out, engine_root, counts, conversion, motifs,
@@ -819,12 +1073,25 @@ def main(argv=None) -> int:
         extras = []
         if args.mode == "full":
             extras = run_full_layers(args, out, engine_out, counts_root, log, env)
-        write_index(args, out, engine_out, counts, controls, conversion, extras)
+        figures = None
+        if figures_wanted(args):
+            reason = figure_skip_reason(args, conversion)
+            if reason:
+                log("SKIP figures: " + reason)
+                figures = {"skipped": reason}
+            else:
+                figures = build_quick_figures(args, out, engine_out, roots, root_motifs, scores,
+                                              alias, known, additional, log)
+        write_index(args, out, engine_out, counts, controls, conversion, extras, figures)
+        figure_controls = (figures or {}).get("controls", [])
         manifest.update(status="complete", engine_wall_seconds=wall,
                         n_motifs=len(motifs), conversion=conversion,
-                        positive_control=controls,
+                        positive_control=controls, figure_positive_control=figure_controls,
+                        figures=[str(p) for p in (figures or {}).get("figures", [])],
+                        figures_skipped=(figures or {}).get("skipped"),
                         event_counts={k: counts[k]["n_events"] for k in counts})
-        if controls and not all(row["pass"] for row in controls) and not args.positive_control_advisory:
+        checks = controls + figure_controls
+        if checks and not all(row["pass"] for row in checks) and not args.positive_control_advisory:
             manifest["status"] = "complete_with_failed_positive_control"
             exit_code = 3
     except Exception as exc:  # recorded, then re-raised through the exit code
