@@ -24,8 +24,8 @@ def text_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_version_is_4_2():
-    assert lol.FIG_VERSION == "4.2"
+def test_version_is_4_3():
+    assert lol.FIG_VERSION == "4.3"
 
 
 def test_text_precedence_is_command_line_then_record_then_default(tmp_path):
@@ -95,6 +95,6 @@ def test_single_layer_main_draws_the_released_layer_with_overridden_text(tmp_pat
     assert "TEST GATE n=20" in svg and "TEST DIRECTION" in svg
     assert "TEST TAIL " + skill.git_revision(ROOT)[:7] in svg
     assert "use for RBP ORDER only" in svg
-    manifest = (figures / "figures_manifest_v42.tsv").read_text(encoding="utf-8")
+    manifest = (figures / "figures_manifest_v43.tsv").read_text(encoding="utf-8")
     assert "calibrated_ranksum" in manifest, "the skipped supplement must be recorded, not silently dropped"
     assert (figures / "index.html").is_file()

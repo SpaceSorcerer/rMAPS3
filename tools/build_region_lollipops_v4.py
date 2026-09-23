@@ -1,4 +1,10 @@
-"""rMAPS3 SE region-resolved lollipops, version 4.2 (rank-sum layers).
+"""rMAPS3 SE region-resolved lollipops, version 4.3 (rank-sum layers).
+
+v4.3 (2026-09-23) over v4.2: dot colour = direction hue (included = RBP-RELI gold #E69F00, skipped =
+RBP-RELI blue #0072B2), deepened continuously (OKLCh, hue fixed) as the significance value falls from 0.05
+to the floor (supplement: calibrated q, floor 1/(B2+1); main: raw rank-sum p, floor = 10^-(y cap));
+Okabe-Ito grey #999999 when the value is >= 0.05. The four-bin key is replaced by two colour bars.
+Everything else is v4.2.
 
 v4.2 (2026-09-22) over v4.1: the supplement reads calibration v2 (target-exon cluster permutation,
 tools/calibrate_ranksum_v2.py); by-motif colour = motif-level cluster q (family 726); by-RBP stem, rank and
@@ -49,8 +55,8 @@ SUBREGIONS = ['upstreamExon-3prime', 'upstreamExonIntron', 'upstreamIntron', 'ta
 POOLING = {'Upstream Intron': (1, 2), 'Exon Body': (3, 4), 'Downstream Intron': (5, 6)}
 RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
-FIG_VERSION = '4.2'
-SFX = '_v42'
+FIG_VERSION = '4.3'
+SFX = '_v43'
 RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
 SCORE_FIELDS = ['fg_mean_count', 'bg_mean_count', 'count_ratio', 'fg_proportion', 'bg_proportion',
@@ -636,14 +642,154 @@ def ratio_area(r):
     return 24 + 116 * math.log2(1 + r)
 
 
-def qcolor(q):
-    if not math.isfinite(q):
-        raise ValueError('Missing q')
-    return COLORS[0 if q < .01 else 1 if q < .05 else 2 if q < .1 else 3]
+# ---------------------------------------------------------------- colour: direction hue x significance depth (v4.3)
+# Hues and light tints are the RBP-RELI builder's own hex codes
+# (F:/RNA-SEQ-ANALYSIS/RBP-RELI/RBP-RELI/scripts/build_region_resolved_lollipop.py: INCL_GOLD, SKIP_BLUE, and the
+# first stop of gold_cmap / blue_cmap). Grey = Okabe-Ito grey. Ramp: OKLCh, hue held at the full colour's hue,
+# lightness and chroma linear in -log10 s from the tint (s just below 0.05) to the full hue (s at the floor/cap).
+DIRECTION_HUE = {'INCLUDED': '#E69F00', 'SKIPPED': '#0072B2'}
+DIRECTION_TINT_SOURCE = {'INCLUDED': '#F4E3B8', 'SKIPPED': '#CDE3F2'}
+NS_GREY = '#999999'
+SIG_ALPHA = 0.05
 
 
-def pcolor(p):
-    return COLORS[0 if p < .001 else 1 if p < .01 else 2 if p < .05 else 3]
+def _srgb_to_linear(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c):
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def hex_to_oklch(hx):
+    r, g, b = (_srgb_to_linear(int(hx[i:i + 2], 16) / 255) for i in (1, 3, 5))
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+    a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+    bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    return L, math.hypot(a, bb), math.atan2(bb, a)
+
+
+def oklch_to_rgb(L, C, h):
+    """Linear-to-sRGB conversion; returns unclipped sRGB floats (callers check the gamut)."""
+    a, b = C * math.cos(h), C * math.sin(h)
+    l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+    g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+    bl = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+    return tuple(_linear_to_srgb(v) if v >= 0 else -_linear_to_srgb(-v) for v in (r, g, bl))
+
+
+def _to_hex(rgb):
+    return '#' + ''.join(f'{round(min(1.0, max(0.0, v)) * 255):02X}' for v in rgb)
+
+
+def depth_fraction(s, floor):
+    """0 at s = 0.05 (tint), 1 at s <= floor (full hue); linear in -log10 s."""
+    lo, hi = -math.log10(SIG_ALPHA), -math.log10(floor)
+    if hi <= lo:
+        raise ValueError(f'Colour-ramp floor {floor} is not below {SIG_ALPHA}')
+    return min(1.0, max(0.0, (-math.log10(s) - lo) / (hi - lo)))
+
+
+def significance_colour(direction, s, floor):
+    """Dot colour: grey when s >= 0.05, else the direction hue deepened by significance."""
+    if not (isinstance(s, (int, float)) and math.isfinite(s) and s > 0):
+        raise ValueError(f'Colour needs a finite positive significance value, got {s!r}')
+    if s >= SIG_ALPHA:
+        return NS_GREY
+    t = depth_fraction(s, floor)
+    if t >= 1.0:
+        return DIRECTION_HUE[direction]
+    Lf, Cf, hf = hex_to_oklch(DIRECTION_HUE[direction])
+    Lt, Ct, _ = hex_to_oklch(DIRECTION_TINT_SOURCE[direction])
+    return _to_hex(oklch_to_rgb(Lt + t * (Lf - Lt), Ct + t * (Cf - Ct), hf))
+
+
+def ramp_check(direction, n=256):
+    """Lightness monotone and every step inside sRGB before rounding; returns (monotone, in_gamut, tint_hex)."""
+    Lf, Cf, hf = hex_to_oklch(DIRECTION_HUE[direction])
+    Lt, Ct, _ = hex_to_oklch(DIRECTION_TINT_SOURCE[direction])
+    Ls, ok = [], True
+    for i in range(n):
+        t = i / (n - 1)
+        rgb = oklch_to_rgb(Lt + t * (Lf - Lt), Ct + t * (Cf - Ct), hf)
+        ok &= all(-1e-6 <= v <= 1 + 1e-6 for v in rgb)
+        Ls.append(hex_to_oklch(_to_hex(rgb))[0])
+    mono = all(b <= a + 1e-9 for a, b in zip(Ls, Ls[1:]))
+    return mono, ok, _to_hex(oklch_to_rgb(Lt, Ct, hf))
+
+
+def colour_floor(layer, refinement, scale):
+    """Significance value at which the ramp reaches the full hue; one value per arm x layer."""
+    if layer == 'calibrated_ranksum':
+        return 1 / (refinement['stage2_permutations'] + 1)
+    return 10 ** (-float(scale['ymax']))
+
+
+def floor_label(layer, refinement, scale):
+    if layer == 'calibrated_ranksum':
+        return f"≤ 1/{refinement['stage2_permutations'] + 1:,} (floor)"
+    return f"≤ 1e−{float(scale['ymax']):g} (y cap)"
+
+
+def _hex_of(rgba):
+    return '#' + ''.join(f'{round(v * 255):02X}' for v in rgba[:3])
+
+
+def draw_colour_key(fig, layer, refinement, scale, legend_top=.198):
+    """Two horizontal bars (included, skipped) on -log10 s from 0.05 to the floor/cap, plus the grey swatch."""
+    floor = colour_floor(layer, refinement, scale)
+    for d in DIRECTION_HUE:
+        monotone, in_gamut, _ = ramp_check(d)
+        if not (monotone and in_gamut):
+            raise ValueError(f'Colour ramp for {d} is not monotone in lightness or leaves sRGB')
+    raw = layer == 'released_ranksum_rawP'
+    symbol = 'p' if raw else 'q'
+    height_pt = 176
+    fh = fig.get_figheight() * 72
+    ax = fig.add_axes([.772, legend_top - height_pt / fh, .200, height_pt / fh])
+    ax.axis('off')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, height_pt)
+    ax.add_patch(Rectangle((0, 0), 1, 1, transform=ax.transAxes, facecolor='#FAFAFA', edgecolor='#AAAAAA',
+                           lw=.7, clip_on=False))
+    ax.text(.04, height_pt - 16, ('Dot colour: raw rank-sum p' if raw else 'Dot colour: calibrated BH q'),
+            fontsize=14, va='center')
+    x0, x1 = .30, .95
+    lo, hi = -math.log10(SIG_ALPHA), -math.log10(floor)
+    grid = np.linspace(lo, hi, 256)
+    bar_y = {'INCLUDED': height_pt - 46, 'SKIPPED': height_pt - 72}
+    for d, y in bar_y.items():
+        rgb = [mcolors_to_rgb(significance_colour(d, max(10 ** -v, floor), floor)) if v > lo else
+               mcolors_to_rgb(significance_colour(d, SIG_ALPHA * (1 - 1e-12), floor)) for v in grid]
+        ax.imshow(np.array([rgb]), extent=(x0, x1, y - 9, y + 9), aspect='auto', interpolation='nearest',
+                  zorder=2)
+        ax.add_patch(Rectangle((x0, y - 9), x1 - x0, 18, facecolor='none', edgecolor='#333333', lw=.6, zorder=3))
+        ax.text(x0 - .03, y, d.lower(), ha='right', va='center', fontsize=14, weight='bold',
+                color=DIRECTION_HUE[d])
+    ticks = [(SIG_ALPHA, '0.05', 0), (0.01, '0.01', 1), (0.001, '0.001', 2)]
+    tick_top = bar_y['SKIPPED'] - 9
+    for value, label, row in ticks:
+        if value < floor:
+            continue
+        x = x0 + (x1 - x0) * (-math.log10(value) - lo) / (hi - lo)
+        ax.plot([x, x], [tick_top, tick_top - 4 - 15 * row], color='#333333', lw=.6, zorder=3)
+        ax.text(x, tick_top - 11 - 15 * row, label, ha='center', va='center', fontsize=12)
+    ax.plot([x1, x1], [tick_top, tick_top - 4], color='#333333', lw=.6, zorder=3)
+    ax.text(x1, tick_top - 11, floor_label(layer, refinement, scale), ha='right', va='center', fontsize=12)
+    grey_y = 18
+    ax.scatter([.07], [grey_y], s=140, marker='o', color=NS_GREY, edgecolor='#333333', linewidth=.7)
+    ax.text(.11, grey_y, f'{symbol} ≥ 0.05 (not significant)', fontsize=14, va='center')
+    return floor
+
+
+def mcolors_to_rgb(hx):
+    return [int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5)]
 
 
 def rank_key(r):
@@ -751,7 +897,8 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                  ' — one-sided rank-sum on per-event motif hit counts, regional minimum over 50-nt windows, raw p',
                  'raw rank-sum p from the released tool: use for RBP ORDER only',
                  SIZE_SENTENCE, 'SIZE_KEY',
-                 'Dot colour = raw rank-sum p (no multiple-testing adjustment)', None,
+                 'Dot colour = direction hue (included gold, skipped blue), deeper as raw rank-sum p falls '
+                 '(no multiple-testing adjustment); grey = p ≥ 0.05; key at right',
                  direction,
                  'stems above the cap are truncated and labelled with their value']
     else:
@@ -762,6 +909,7 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
         colour = ('Dot colour = calibrated BH q (motif level)' if not by_rbp else
                   'Dot colour = RBP-level calibrated BH q — RBP-level q: max-z (min-P pending)' if maxz else
                   "Dot colour = RBP-level calibrated BH q (min-P over the RBP's motifs)")
+        colour += '; hue = direction, deeper as q falls; grey = q ≥ 0.05; key at right'
         lines = ['Stem height = −log10 calibrated p' + (' (RBP level)' if by_rbp else ''),
                  'Layer: same statistic; p from label permutation over target-exon clusters (Westfall–Young, min over '
                  'windows and, for the by-RBP figure,',
@@ -771,7 +919,7 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                  'null = exchangeability of changed target exons within the tested universe; ' + caveat,
                  *( [sensitivity] if sensitivity else [] ),
                  SIZE_SENTENCE, 'SIZE_KEY',
-                 colour, None,
+                 colour,
                  direction,
                  'stems above the cap are truncated and labelled with their value']
     if open_dots:
@@ -796,12 +944,6 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                 ax.scatter([x], [y], s=ratio_area(value), marker='o', color='#BBBBBB', edgecolor='#333333',
                            linewidth=.7)
                 ax.text(x + .055, y, f'{value:.2f} ({name} in this arm)', va='center', fontsize=14)
-        elif line is None:
-            labels = (['p < 0.001', '0.001–0.01', '0.01–0.05', '≥0.05 (not significant)'] if raw else
-                      ['q < 0.01', '0.01–0.05', '0.05–0.10', '≥0.10 (not significant)'])
-            for x, c, label in zip([.025, .26, .44, .62], COLORS, labels):
-                ax.scatter([x], [y], s=140, marker='o', color=c, edgecolor='#333333', linewidth=.7)
-                ax.text(x + .022, y, label, fontsize=14, va='center')
         else:
             ax.text(.018, y, line, fontsize=14, va='center')
     ax.text(.985, height_pt - 3 - 13, f'rMAPS3 figure version {FIG_VERSION}', ha='right', va='center',
@@ -927,8 +1069,9 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
                                     and r['_calib_perms_used'] == refinement['stage2_permutations'] for r in entries)
     max_value = max(-math.log10(r['_p']) for rows in panels.values() for r in rows)
     ymax, step = scale['ymax'], scale['step']
-    truncated_rows, open_dot_rows = [], []
+    truncated_rows, open_dot_rows, colour_rows = [], [], []
     axes = []
+    depth_floor = colour_floor(layer, refinement, scale)
     for ri, d in enumerate(DIRECTIONS):
         for ci, p in enumerate(REGIONS):
             ax = fig.add_axes([.065 + ci * .305, .68 if ri == 0 else .31, .265, .175])
@@ -939,7 +1082,8 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
                 truncated = value > ymax + 1e-12
                 y = ymax if truncated else value
                 ax.vlines(i, 0, y, color='#BBBBBB', lw=1.2, zorder=2)
-                colour = qcolor(r['_q']) if calibrated else pcolor(r['_p'])
+                sig = r['_q'] if calibrated else r['_p']
+                colour = significance_colour(d, sig, depth_floor)
                 score = r['_size_ratio']
                 if math.isfinite(score):
                     dot = ax.scatter(i, y, s=ratio_area(score), color=colour, edgecolor='#333333',
@@ -952,6 +1096,18 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
                                           'fg_mean_count': r['_fg_mean_count'],
                                           'bg_mean_count': r['_bg_mean_count']})
                 dot.set_gid(f'dot_{ri}_{ci}_{i}')
+                drawn = _hex_of((dot.get_facecolor() if math.isfinite(score) else dot.get_edgecolor())[0])
+                is_grey = drawn == NS_GREY
+                hue_err = None if is_grey else abs(math.remainder(hex_to_oklch(drawn)[2]
+                                                                  - hex_to_oklch(DIRECTION_HUE[d])[2], math.tau))
+                colour_rows.append({'direction': d, 'pooled_region': p, 'rank': i + 1, 'label': r['_label'],
+                                    'motif_key': r['motif_key'],
+                                    'significance_column': ('q' if calibrated else 'raw p'),
+                                    'significance_value': sig, 'depth_floor': depth_floor,
+                                    'depth_fraction': None if sig >= SIG_ALPHA else depth_fraction(sig, depth_floor),
+                                    'drawn_hex': drawn, 'drawn_grey': is_grey,
+                                    'hue_error_rad': hue_err,
+                                    'pass': (is_grey == (sig >= SIG_ALPHA)) and (is_grey or hue_err < 0.25)})
                 if truncated:
                     draw_break(ax, i, ymax)
                     label = ax.text(i + .38, ymax, truncation_text(value), fontsize=12, color='#333333',
@@ -1014,6 +1170,7 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
         fig.text(.5, .208, lines[2], ha='center', fontsize=14, color='#555555')
     draw_legend(fig, layer, refinement, size_key, bool(open_dot_rows), excluded=excluded, kind=kind, texts=texts,
                 caveat=caveat, sensitivity=sensitivity)
+    draw_colour_key(fig, layer, refinement, scale)
     fig.text(.5, .012, tail_line(texts, layer, refinement), ha='center', fontsize=14, color='#555555')
     report = layout_audit(fig, axes, model_artists, path, ymax, max_value)
     report.update({'layer': layer, 'kind': kind, 'arm': arm, 'excluded': excluded,
@@ -1023,10 +1180,14 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
                    'power_label_drawn': warn, 'power_label': power['label'] if power else None,
                    'figure_version': FIG_VERSION, 'size_key': size_key,
                    'n_open_dots': len(open_dot_rows), 'open_dots': open_dot_rows,
-                   'n_stems_truncated': len(truncated_rows), 'truncated_stems': truncated_rows})
+                   'n_stems_truncated': len(truncated_rows), 'truncated_stems': truncated_rows,
+                   'colour_floor': depth_floor, 'dot_colours': colour_rows,
+                   'colour_audit_pass': all(row['pass'] for row in colour_rows)})
     fig.savefig(str(path) + '.svg', metadata={'Date': None})
     fig.savefig(str(path) + '.png', dpi=PNG_DPI)
     plt.close(fig)
+    if not report['colour_audit_pass']:
+        raise ValueError(f'Colour audit failed: {path}')
     if not report['pass']:
         Path(str(path) + '_layout_failure.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         raise ValueError(f'Layout audit failed: {path}; see _layout_failure.json')
@@ -1149,10 +1310,10 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                               mean_rho=float(np.mean(valid)) if valid else None,
                               mean_top10_overlap=float(np.mean([r['top10_overlap'] for r in rows])),
                               n_panels=len(rows), n_defined_rho_panels=len(valid)))
-    write_tsv(dest / f'{arm}_rank_comparison_v42.tsv', fields, ranks)
+    write_tsv(dest / f'{arm}_rank_comparison_v43.tsv', fields, ranks)
     comparison_fields = ['arm', 'direction', 'pooled_region', 'layer1', 'layer2', 'n_rbps', 'rho', 'rho_status',
                          'top10_overlap', 'top10_n_layer1', 'top10_n_layer2']
-    write_tsv(dest / f'{arm}_rank_panel_comparisons_v42.tsv', comparison_fields, comparisons)
+    write_tsv(dest / f'{arm}_rank_panel_comparisons_v43.tsv', comparison_fields, comparisons)
     method_rows = []
     if method_tsv and Path(method_tsv).is_file():
         wide = defaultdict(dict)
@@ -1288,8 +1449,9 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
              '<p class="main"><b>MAIN — Authors\u2019 rMAPS3 rank-sum, raw p.</b> The collaborators\u2019 released '
              'rMAPS3 code at commit ' + RELEASED_COMMIT + ' run with <code>--stat-method ' + STAT_METHOD + '</code>: a '
              'one-sided rank-sum test on per-event motif hit counts, reduced to the smallest p over the 50-nt windows '
-             'of each region. Stems and ranking are the raw p exactly as the tool reports it, colours are raw-p bins '
-             '(&lt;0.001, &lt;0.01, &lt;0.05, \u22650.05) and dots have constant size because the released tool '
+             'of each region. Stems and ranking are the raw p exactly as the tool reports it, colour hue is the '
+             'direction (included gold, skipped blue), deepening continuously as raw p falls from 0.05 to the y cap, '
+             'grey at p \u2265 0.05, and dots have constant size because the released tool '
              'reports no enrichment ratio. No multiple-testing adjustment is applied, because none is part of the '
              'tool. The p-values come from the tie-corrected normal approximation and are anti-conservative in the '
              'sparse tail; the RBP order is the claim.</p>',
@@ -1310,14 +1472,14 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
              '<p>' + (f'<a href="{v41_archive_name}/index.html">Archived version 4.1 index</a> · '
                       if v41_archive_name else '') +
              f'<a href="{archive_name}/index.html">Archived version 3.1 index (Fisher layers)</a> · '
-             '<a href="naming_audit_v42.tsv">Naming audit</a> · <a href="selection_audit_v42.tsv">Selections</a> · '
-             '<a href="exclusion_audit_v42.tsv">Exclusions</a> · '
+             '<a href="naming_audit_v43.tsv">Naming audit</a> · <a href="selection_audit_v43.tsv">Selections</a> · '
+             '<a href="exclusion_audit_v43.tsv">Exclusions</a> · '
              '<a href="positive_control_audit.tsv">QKI positive controls</a> · '
-             '<a href="rank_agreement_summary_v42.tsv">Rank agreement</a> · '
-             '<a href="y_scale_audit_v42.tsv">Y-scale caps</a> · '
-             '<a href="power_label_audit_v42.tsv">Power labels</a> · '
-             '<a href="truncation_audit_v42.tsv">Truncated stems</a> · '
-             '<a href="figures_manifest_v42.tsv">Manifest (includes skipped layers)</a></p>']
+             '<a href="rank_agreement_summary_v43.tsv">Rank agreement</a> · '
+             '<a href="y_scale_audit_v43.tsv">Y-scale caps</a> · '
+             '<a href="power_label_audit_v43.tsv">Power labels</a> · '
+             '<a href="truncation_audit_v43.tsv">Truncated stems</a> · '
+             '<a href="figures_manifest_v43.tsv">Manifest (includes skipped layers)</a></p>']
     if skipped:
         parts.append('<h2>Layers not built</h2><table><tr><th>Arm</th><th>Layer</th><th>Missing input</th></tr>' +
                      ''.join(f'<tr><td>{html.escape(s["arm"])}</td><td>{html.escape(s["layer"])}</td>'
@@ -1382,8 +1544,8 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
                              f'<img loading="lazy" src="{rel}{QKI_MAP_NAME}" alt="{arm} {QKI_MAP_NAME}"></a>'
                              '<p>authors’ rMAPS3 per-motif map, unmodified</p></article>')
         parts.append(f'<p><a href="{arm}/{arm}_rank_comparison.xlsx">Rank workbook (.xlsx)</a> · '
-                     f'<a href="{arm}/{arm}_rank_comparison_v42.tsv">Ranks TSV</a> · '
-                     f'<a href="{arm}/{arm}_figure_provenance_v42.md">Provenance sidecar</a></p></section>')
+                     f'<a href="{arm}/{arm}_rank_comparison_v43.tsv">Ranks TSV</a> · '
+                     f'<a href="{arm}/{arm}_figure_provenance_v43.md">Provenance sidecar</a></p></section>')
     (out / 'index.html').write_text('\n'.join(parts + ['</html>']), encoding='utf-8')
 
 
@@ -1458,10 +1620,10 @@ def main(argv=None):
     if unknown:
         raise ValueError(f'Missing arm labels: {sorted(unknown)}')
     mappings, naming_rows, naming_stats = load_naming(args.naming_table, args.esrp_table, args.gtf, args.alias_table)
-    write_tsv(out / 'naming_audit_v42.tsv',
+    write_tsv(out / 'naming_audit_v43.tsv',
               ['table_name', 'hgnc_symbol', 'source', 'evidence', 'ambiguity_note', 'n_motifs', 'merged_into'],
               naming_rows)
-    (out / 'naming_report_v42.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
+    (out / 'naming_report_v43.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
     lists = {'spliceosome_census': load_exclusion_list(args.spliceosome_list),
              'broad_binders': load_exclusion_list(args.broad_binders_list)}
     aliases = naming_stats['alias_mappings']
@@ -1609,7 +1771,7 @@ def main(argv=None):
                     'Power is adequate, so no label is drawn on the figures.'))
                 if power else
                 '- Statistical power: no power_label in the calibration summary for this arm; no label drawn and '
-                'the gap recorded in figures_manifest_v42.tsv.',
+                'the gap recorded in figures_manifest_v43.tsv.',
                 f'- Layers skipped for this arm: '
                 f'{", ".join(s["layer"] for s in skipped if s["arm"] == arm) or "none"}.',
                 f'- Gate {args.gate}, rule {arm.rsplit("_", 1)[1]}: included {counts["n_up"]}, '
@@ -1671,17 +1833,24 @@ def main(argv=None):
             prov.append(f'- Cross-check: the native rank-sum p of all {crosschecked} pooled tests in the calibration '
                         'summary equals the released root table value to a relative tolerance of 1e-9, so both layers '
                         'describe the same statistic.')
-        prov += ['- No p-value or q-value is recomputed by this script. Colour bins: raw p <0.001, <0.01, <0.05, '
-                 '>=0.05; calibrated q <0.01, <0.05, <0.10, >=0.10.',
+        prov += ['- No p-value or q-value is recomputed by this script. Colour (v4.3): hue = direction, included '
+                 '#E69F00 and skipped #0072B2 (RBP-RELI INCL_GOLD / SKIP_BLUE, build_region_resolved_lollipop.py); '
+                 'value >= 0.05 = Okabe-Ito grey #999999; below 0.05 the colour runs in OKLCh with the hue fixed, '
+                 'lightness and chroma linear in -log10 value, from a tint (lightness/chroma of the RBP-RELI ramp '
+                 'first stop #F4E3B8 / #CDE3F2, giving #FBE0B9 / #CFE2F3) at 0.05 to the full hue at the floor. '
+                 'Value = calibrated q on the supplement (floor 1/(B2+1)) and raw rank-sum p on the main layer '
+                 '(floor = 10^-(y cap), so the ramp is not driven by the extreme p). Lightness is monotone and every '
+                 'ramp step is inside sRGB (checked at build time). Every drawn dot colour is read back from the '
+                 'figure and audited in colour_audit_v43.tsv.',
                  '- Representative sub-region for a pooled region: smallest native rank-sum p, then enrichment ratio '
                  'descending, then sub-region name.',
                  '- byRBP: best motif per HGNC group by layer p, ties by enrichment ratio descending then display '
                  'label then motif key. No k/n numerals are drawn on any figure; the per-group significant-motif '
-                 'counts are in selection_audit_v42.tsv.',
+                 'counts are in selection_audit_v43.tsv.',
                  '- Tick labels: HGNC group everywhere, except that byMotif panels label the twelve synthetic '
                  'ESRP-like hexamers by sequence, because they carry no gene name and would otherwise repeat the '
                  'same word. Ranking is unaffected: it uses the group label, not the tick label. Every drawn tick '
-                 'label is recorded in selection_audit_v42.tsv.',
+                 'label is recorded in selection_audit_v43.tsv.',
                  '- Naming: display and grouping use the supplied HGNC alias table, otherwise the exact GENCODE v49 '
                  'gene_name. Mappings: ' + '; '.join(f'{n} → {s}' for n, s in naming_stats['alias_mappings'].items()) +
                  '. HGNC-ambiguous aliases: 9G8 (SRSF7/SLU7; supplied resolution SRSF7) and SRp40 (SRSF5/NOLC1; '
@@ -1695,7 +1864,7 @@ def main(argv=None):
                  'minimum 4; raw p: a 1/2/2.5/5/10 scale). When that cap already exceeds the largest value nothing '
                  'is truncated and the limit is the plain rounded maximum. Stems above the cap are drawn to the cap, '
                  'carry a two-diagonal axis-break glyph and have their exact value printed beside the dot; the '
-                 'legend box says so. Every truncated stem is listed in truncation_audit_v42.tsv. Included up, '
+                 'legend box says so. Every truncated stem is listed in truncation_audit_v43.tsv. Included up, '
                  'skipped down; gene model between the rows.']
         for layer in sorted(scales):
             s = scales[layer]
@@ -1709,10 +1878,10 @@ def main(argv=None):
                  'out-of-bounds audit.',
                  '- Source SHA256:']
         prov += [f'  - {str(p)}: {digest(p, "sha256")}' for p in sources]
-        (dest / f'{arm}_figure_provenance_v42.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
-        (dest / 'command_v42.log').write_text(
+        (dest / f'{arm}_figure_provenance_v43.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
+        (dest / 'command_v43.log').write_text(
             ' '.join([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]) + '\n', encoding='utf-8')
-        (dest / 'versions_v42.txt').write_text(
+        (dest / 'versions_v43.txt').write_text(
             f'Python\t{sys.version.split()[0]}\nmatplotlib\t{matplotlib.__version__}\n'
             f'openpyxl\t{openpyxl.__version__}\nnumpy\t{np.__version__}\nPNG_DPI\t{PNG_DPI}\n', encoding='utf-8')
         for layer, s in sorted(scales.items()):
@@ -1726,17 +1895,17 @@ def main(argv=None):
     write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name)
     if controls:
         write_tsv(out / 'positive_control_audit.tsv', list(controls[0]), controls)
-    write_tsv(out / 'selection_audit_v42.tsv', list(audits[0]), audits)
-    write_tsv(out / 'exclusion_audit_v42.tsv', list(exclusion_rows[0]), exclusion_rows)
-    write_tsv(out / 'rank_agreement_summary_v42.tsv', ['arm', 'layer1', 'layer2', 'mean_rho', 'mean_top10_overlap',
+    write_tsv(out / 'selection_audit_v43.tsv', list(audits[0]), audits)
+    write_tsv(out / 'exclusion_audit_v43.tsv', list(exclusion_rows[0]), exclusion_rows)
+    write_tsv(out / 'rank_agreement_summary_v43.tsv', ['arm', 'layer1', 'layer2', 'mean_rho', 'mean_top10_overlap',
                                                          'n_panels', 'n_defined_rho_panels'], rank_summary)
-    write_tsv(out / 'y_scale_audit_v42.tsv', list(scale_rows[0]), scale_rows)
+    write_tsv(out / 'y_scale_audit_v43.tsv', list(scale_rows[0]), scale_rows)
     if power_rows:
-        write_tsv(out / 'power_label_audit_v42.tsv', list(power_rows[0]), power_rows)
-    write_tsv(out / 'dot_size_audit_v42.tsv', list(size_rows[0]), size_rows)
+        write_tsv(out / 'power_label_audit_v43.tsv', list(power_rows[0]), power_rows)
+    write_tsv(out / 'dot_size_audit_v43.tsv', list(size_rows[0]), size_rows)
     if open_dot_rows:
-        write_tsv(out / 'open_dot_audit_v42.tsv', list(open_dot_rows[0]), open_dot_rows)
-    write_tsv(out / 'truncation_audit_v42.tsv',
+        write_tsv(out / 'open_dot_audit_v43.tsv', list(open_dot_rows[0]), open_dot_rows)
+    write_tsv(out / 'truncation_audit_v43.tsv',
               ['arm', 'layer', 'variant', 'kind', 'shared_ymax', 'direction', 'pooled_region', 'rank', 'label',
                'tick', 'motif_key', 'log10p', 'printed'],
               truncation_rows or [{'arm': 'NONE', 'layer': 'NONE', 'variant': 'NONE', 'kind': 'NONE',
@@ -1744,8 +1913,15 @@ def main(argv=None):
                                    'label': 'NA', 'tick': 'NA', 'motif_key': 'NA', 'log10p': 'NA',
                                    'printed': 'no stem exceeded its cap in this build'}])
     if universe_rows:
-        write_tsv(out / 'rank_universe_notes_v42.tsv', list(universe_rows[0]), universe_rows)
-    (out / 'layout_report_v42.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
+        write_tsv(out / 'rank_universe_notes_v43.tsv', list(universe_rows[0]), universe_rows)
+    colour_rows = [{'figure': rep['figure'], 'arm': rep['arm'], 'layer': rep['layer'], 'kind': rep['kind'],
+                    'excluded': rep['excluded'], **row} for rep in layouts for row in rep['dot_colours']]
+    if colour_rows:
+        write_tsv(out / ('colour_audit' + SFX + '.tsv'), list(colour_rows[0]), colour_rows)
+        bad = [row for row in colour_rows if not row['pass']]
+        if bad:
+            raise ValueError(f'Colour audit failed on {len(bad)} dots')
+    (out / 'layout_report_v43.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
     for s in skipped:
         manifest_rows.append({'arm': s['arm'], 'rbp_level_column': 'NA', 'layer': s['layer'],
                               'status': 'skipped_input_missing',
@@ -1754,16 +1930,16 @@ def main(argv=None):
     built = {p for rec in records for p in (out / rec['arm']).rglob('*')}
     built |= {p for p in out.glob('*') if p.is_file()}
     for p in sorted(built):
-        if not p.is_file() or p.name == 'figures_manifest_v42.tsv':
+        if not p.is_file() or p.name == 'figures_manifest_v43.tsv':
             continue
         layer = next((l for l in LAYERS if l in p.name), 'ALL')
         arm_name = p.parent.name if p.parent != out else 'ALL'
         manifest_rows.append({'arm': arm_name, 'rbp_level_column': rbp_cols.get(arm_name, 'NA'), 'layer': layer,
                               'status': 'built', 'file': str(p.resolve()), 'bytes': p.stat().st_size,
                               'md5': digest(p)})
-    write_tsv(out / 'figures_manifest_v42.tsv', ['arm', 'rbp_level_column', 'layer', 'status', 'file', 'bytes', 'md5'],
+    write_tsv(out / 'figures_manifest_v43.tsv', ['arm', 'rbp_level_column', 'layer', 'status', 'file', 'bytes', 'md5'],
               manifest_rows)
-    print(f'OK v4.2 index, audits, layout report and manifest: {out}', flush=True)
+    print(f'OK v4.3 index, audits, layout report and manifest: {out}', flush=True)
     if skipped:
         print('SKIPPED LAYERS: ' + '; '.join(f'{s["arm"]}/{s["layer"]}' for s in skipped), flush=True)
 
