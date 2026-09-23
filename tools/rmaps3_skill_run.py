@@ -5,8 +5,10 @@ quick  runs the engine exactly as the lab launchers do, converts the countDist t
        per-motif npz archives, proves those archives reproduce the engine's own root tables,
        deletes only the verified temporaries, and writes quick_summary.xlsx, the main-layer
        region lollipops (released rank-sum raw p only; --no-figures skips them) + index.html.
-full   adds the lab layers: Westfall-Young calibration, foreground-bootstrap rank stability and
-       the version 4.1 region lollipops for both layers with their rank workbook.
+full   adds the lab layers: the reportable calibrated supplement (calibrate_ranksum_v2.py: target-exon
+       cluster permutation, RBP-level min-P, unique-k-mer family, row-unit sensitivity columns),
+       foreground-bootstrap rank stability and the version 4.2 region lollipops for both layers with
+       their rank workbook.
 
 Nothing here recomputes or rewrites an engine output. Every path default is a lab convenience and
 is overridable by a flag.
@@ -38,7 +40,6 @@ DEFAULT_RELEASED_ENGINE = r"E:\Claude\rMAPS3_upstream"
 DEFAULT_GTF = r"E:\references\gencode_v49\gencode.v49.primary_assembly.annotation.gtf"
 DEFAULT_EXCLUSION_ROOT = r"F:\RNA-SEQ-ANALYSIS\RBP-RELI\RBP-RELI\reli\data"
 DEFAULT_ALIAS = ROOT / "data" / "rbp_alias_hgnc_2026-09-17.tsv"
-UNIT_STATUS_UNDECIDED = "permutation unit under review 2026-09-21"
 
 STAT_CAVEATS = {
     "fisher": ("Fisher counts MOTIF HITS, not exons: repeated hits in one exon enter the 2x2 table "
@@ -630,7 +631,7 @@ def figure_positive_control(selections: dict, arm: str, symbol: str, panels) -> 
 
 def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: list,
                         scores: dict, alias: dict, known: Path, additional, log) -> dict:
-    """Main-layer region lollipops (released rank-sum, raw p) drawn by the v4.1 builder's own
+    """Main-layer region lollipops (released rank-sum, raw p) drawn by the v4.2 builder's own
     functions: naming, released-table reader, motif scores, shared y-scale, panel selection and
     draw_figure with its layout audit. The builder's main() is not used because its
     rank-comparison step needs a second layer or a v3.1 archive; nothing in it is modified."""
@@ -780,7 +781,7 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
             "skipped panels hang down, all six share one y-scale, and the footer gives n events.</p>"
             "<p><b>What they do not show:</b> a calibrated p, a q-value or any multiple-testing "
             "adjustment. The p is anti-conservative; <b>use them for the RBP ORDER only</b>. "
-            "The calibrated supplement is built by <code>--mode full</code>.</p>"
+            "The calibrated supplement, the p and q to report, is built by <code>--mode full</code>.</p>"
             '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">')
         for path in figures["figures"]:
             if path.suffix != ".png":
@@ -836,8 +837,18 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
 
 
 # ------------------------------------------------------------------ full-mode layers
+def target_exon_line(report_path: Path) -> str:
+    """'n events (rMATS SE rows) over N target exons' for the three sets, from the calibration report."""
+    report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    ev, tx = report["events"], report["target_exons"]
+    return ("n events (rMATS SE rows) over N target exons: included {} over {}; skipped {} over {}; "
+            "background {} over {}; target exons in both changed sets (kept in both, as the tool does) {}"
+            .format(ev["up"], tx["up"], ev["dn"], tx["dn"], ev["bg"], tx["bg"],
+                    report["target_exons_in_both_changed_foregrounds"]))
+
+
 def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger, env: dict):
-    """Calibration, optional rank stability, and the version 4.1 figures."""
+    """Row-unit sensitivity, the reportable calibration v2.1, optional rank stability, figures v4.2."""
     produced = []
     if counts_root is None:
         raise RuntimeError("--mode full needs the count archives; the countDist temporaries were "
@@ -845,21 +856,33 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
     if args.stat_method != "mannwhitney":
         raise RuntimeError("--mode full calibrates the rank-sum statistic; rerun with "
                            "--stat-method mannwhitney or use --mode quick")
+    common = ["--arm", args.arm, "--counts-root", str(counts_root),
+              "--released-root", str(engine_out.parent), "--alias-table", str(args.alias_table),
+              "--permutations", str(args.permutations), "--refine-perms", str(args.refine_perms),
+              "--refine-threshold", str(args.refine_threshold), "--seed", str(args.seed)]
+    rowunit_root = out / "summary_rowunit"
+    run_step("calibrate_ranksum_rowunit_sensitivity",
+             [sys.executable, str(ROOT / "tools" / "calibrate_ranksum.py"), *common,
+              "--out-root", str(rowunit_root), "--permutation-unit", "row"], log, env, ROOT, out)
     summary_root = out / "summary"
-    status = args.unit_status or (
-        "permutation unit decided" if args.calib_unit_decided else UNIT_STATUS_UNDECIDED)
-    calib = [sys.executable, str(ROOT / "tools" / "calibrate_ranksum.py"),
-             "--arm", args.arm, "--counts-root", str(counts_root),
-             "--released-root", str(engine_out.parent), "--out-root", str(summary_root),
-             "--alias-table", str(args.alias_table),
-             "--permutations", str(args.permutations), "--refine-perms", str(args.refine_perms),
-             "--refine-threshold", str(args.refine_threshold), "--seed", str(args.seed),
-             "--permutation-unit", args.calib_unit, "--unit-status", status]
-    run_step("calibrate_ranksum", calib, log, env, ROOT, out)
-    produced.append(("Calibrated supplement (permutation unit: " + args.calib_unit + "; " + status + ")",
-                     [("calibration workbook", summary_root / args.arm / f"{args.arm}_calibrated_ranksum.xlsx"),
+    command = [sys.executable, str(ROOT / "tools" / "calibrate_ranksum_v2.py"), *common,
+               "--out-root", str(summary_root), "--rowunit-root", str(rowunit_root)]
+    if args.arm in set(args.underpowered_arms):
+        command += ["--underpowered-arms", args.arm]
+    run_step("calibrate_ranksum_v2", command, log, env, ROOT, out)
+    report_path = summary_root / args.arm / "refinement_report.json"
+    counts_line = target_exon_line(report_path)
+    log(counts_line)
+    produced.append(("Calibrated supplement: the p and q to report (target-exon cluster permutation, "
+                     "RBP-level min-P)",
+                     [(counts_line, None),
+                      ("calibration workbook", summary_root / args.arm / f"{args.arm}_calibrated_ranksum_v2.xlsx"),
+                      ("RBP-level table (min-P primary; max-z, mean-z sensitivity)",
+                       summary_root / args.arm / "rbp_level.tsv"),
                       ("per-motif regions TSV", summary_root / args.arm / "per_motif_regions.tsv"),
-                      ("readout", summary_root / args.arm / "readout.md")]))
+                      ("readout", summary_root / args.arm / "readout.md"),
+                      ("row-unit sensitivity (not reportable: duplicate target exons make the row an "
+                       "invalid permutation unit)", rowunit_root / args.arm / "readout.md")]))
 
     stability_dir = None
     stability_run = Path(args.rank_stability_run) if args.rank_stability_run else (
@@ -897,8 +920,12 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
         command += ["--underpowered-arms", args.arm]
     if args.method_comparison:
         command += ["--method-comparison", str(args.method_comparison)]
-    run_step("figures_v4.1", command, log, env, ROOT, out)
-    produced.append(("Region lollipops, figure version 4.1",
+    for flag, value in (("--gate-text", args.gate_text), ("--gate-record", args.gate_record),
+                        ("--direction-text", args.direction_text), ("--tail-text", args.tail_text)):
+        if value:
+            command += [flag, str(value)]
+    run_step("figures_v4.2", command, log, env, ROOT, out)
+    produced.append(("Region lollipops, figure version 4.2",
                      [("figure index", figures / "index.html"),
                       ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
     return produced
@@ -949,10 +976,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="quick mode: skip the main-layer region lollipops")
     p.add_argument("--arm-label", default=None, help="figure title for an arm the builder does not name")
     # full mode
-    p.add_argument("--calib-unit", choices=("row", "exon-dedupe", "cluster"), default="cluster")
-    p.add_argument("--calib-unit-decided", action="store_true",
-                   help="stop labelling the calibrated layer as under review")
-    p.add_argument("--unit-status", default=None)
+    p.add_argument("--calib-unit", choices=("cluster",), default="cluster",
+                   help="permutation unit of the reportable calibration: the target-exon cluster; the "
+                        "row unit is always run beside it as a sensitivity column")
     p.add_argument("--permutations", type=int, default=2000)
     p.add_argument("--refine-perms", type=int, default=100000)
     p.add_argument("--refine-threshold", type=float, default=0.005)
@@ -966,6 +992,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--method-comparison", default=None)
     p.add_argument("--underpowered-arms", nargs="*", default=[])
     p.add_argument("--top-n", type=int, default=10)
+    p.add_argument("--gate-text", default=None,
+                   help="full mode: figure footer gate text (builder --gate-text; default = the dissertation "
+                        "reli_v121 gate sentence)")
+    p.add_argument("--gate-record", default=None,
+                   help="full mode: JSON with gate_text / direction_text / tail_text / tail_text_supplement")
+    p.add_argument("--direction-text", default=None, help="full mode: figure legend direction line")
+    p.add_argument("--tail-text", default=None, help="full mode: figure bottom tail line")
     return p
 
 

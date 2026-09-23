@@ -242,16 +242,23 @@ and say so explicitly; do not quote its p-values as p-values. Note that the audi
 path is not an alternative: it binarizes before ranking (`rmaps_core/se_windows.py`, `WindowCounts.observations`),
 so it scores the same 2x2 as the audited Fisher test. See [LESSONS.md](LESSONS.md) for the worked example.
 
-The supplement is the same statistic with a Westfall–Young min-P label-permutation p and BH q, produced by
-[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py). Calibration leaves the RBP order essentially
-unchanged and removes most of the apparent significance, which is exactly the claim the main layer should make.
+The supplement is the same statistic with a Westfall–Young min-P label-permutation p and BH q, and it is the
+p and q to report. Since 2026-09-22 it is produced by
+[`tools/calibrate_ranksum_v2.py`](tools/calibrate_ranksum_v2.py): labels are permuted over target-exon clusters
+(rMATS rows sharing chr/strand/exonStart/exonEnd move together and are never deduplicated), the RBP-level p is
+min-P over the RBP's motifs inside the permutation (max-z and mean-z as sensitivity columns), and motif keys that
+share one k-mer are tested once. [`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) is the row-unit v1,
+kept only to produce the `*_rowunit` sensitivity columns. Calibration leaves the RBP order essentially unchanged
+and removes most of the apparent significance, which is exactly the claim the main layer should make.
 Run the tools in this order: [`tools/compare_stat_methods.py`](tools/compare_stat_methods.py) to decide which
 layer to report and to record how far the methods disagree;
 [`tools/countdist_to_npz.py`](tools/countdist_to_npz.py) to pack the released `temp/*.countDist.*.txt` tables of
 an arm into per-motif count archives, then
 [`tools/verify_ranksum_archives.py`](tools/verify_ranksum_archives.py) to prove those archives reproduce the
 released root and per-position p-values before anything downstream reads them;
-[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) for the calibrated supplement; and
+[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) `--permutation-unit row` for the row-unit
+sensitivity, then [`tools/calibrate_ranksum_v2.py`](tools/calibrate_ranksum_v2.py) for the reportable
+supplement; and
 [`tools/build_region_lollipops_v4.py`](tools/build_region_lollipops_v4.py) for the figures.
 [`tools/count_aware_stats.py`](tools/count_aware_stats.py) is separate: it recomputes count-aware rank and
 Poisson-rate tests from the audited engine's `positional/*.hits.npz` archives, for comparison only. Every tool
@@ -261,6 +268,7 @@ takes its input and output roots as required arguments; none carries a site-spec
 python tools/compare_stat_methods.py --arms QKI_KO_B --runs-root runs --stat-root stat --alias alias.tsv --out results/comparison
 python tools/countdist_to_npz.py --arm QKI_KO_B --released-root stat/released_mannwhitney --out-root results/counts
 python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root stat/released_mannwhitney --counts-root results/counts
-python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary --alias-table alias.tsv --permutations 2000 --seed 149
+python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary_rowunit --alias-table alias.tsv --permutation-unit row --seed 149
+python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary --alias-table alias.tsv --rowunit-root results/summary_rowunit --seed 149
 python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root results/figures --released-root stat/released_mannwhitney --calibrated-root results/summary --method-comparison results/comparison/method_rank_comparison.tsv --event-sets-root event_sets --alias-table alias.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
 ```

@@ -1,4 +1,11 @@
-"""Westfall-Young min-P calibration of the released rMAPS3 rank-sum statistic.
+"""Westfall-Young min-P calibration of the released rMAPS3 rank-sum statistic: v1, the ROW-UNIT
+version, kept for SENSITIVITY ONLY (superseded 2026-09-22 by tools/calibrate_ranksum_v2.py).
+
+Duplicate target exons (rMATS rows sharing chr/strand/exonStart/exonEnd with different flanking
+exons) make the rMATS row an invalid permutation unit, so the reportable p and q come from
+calibrate_ranksum_v2.py (target-exon cluster unit, RBP-level min-P, unique-k-mer family).
+This module is still imported by v2 for MotifModel and its helpers; run it with
+--permutation-unit row to produce the *_rowunit sensitivity columns v2 carries.
 
 The main figure layer is the authors' released engine run with
 --stat-method mannwhitney: a one-sided Mann-Whitney U on per-exon motif hit
@@ -778,7 +785,7 @@ def main(argv=None) -> int:
                              "target-exon clusters at the observed size composition. exon-dedupe: "
                              "collapse duplicate target exons first, then permute rows.")
     parser.add_argument("--unit-status",
-                        default="permutation unit under review 2026-09-21",
+                        default="row-unit sensitivity only; the reportable p is calibrate_ranksum_v2.py",
                         help="free text recorded beside every calibrated p; set to a decided status "
                              "only once the unit question is settled")
     parser.add_argument("--positions-long", action="store_true", default=True)

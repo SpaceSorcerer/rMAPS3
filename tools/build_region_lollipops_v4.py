@@ -1,9 +1,16 @@
-"""rMAPS3 SE region-resolved lollipops, version 4.1 (rank-sum layers).
+"""rMAPS3 SE region-resolved lollipops, version 4.2 (rank-sum layers).
+
+v4.2 (2026-09-22) over v4.1: the supplement reads calibration v2 (target-exon cluster permutation,
+tools/calibrate_ranksum_v2.py); by-motif colour = motif-level cluster q (family 726); by-RBP stem, rank and
+colour = RBP-level calibrated p/q (min-P over the RBP's motifs; max-z fallback while min-P is absent);
+reportable-p legend wording; footer gate/direction/tail text are arguments or a gate-record JSON;
+main() accepts argv and survives a single-layer run.
 
 Layer 1 / MAIN  : released_ranksum_rawP  - authors' released rMAPS3 (b9a9dce) run with
                   --stat-method mannwhitney; raw regional-minimum p exactly as the tool reports it.
 Layer 2 / SUPP  : calibrated_ranksum     - the same statistic with a Westfall-Young
-                  label-permutation p and BH q over the 756 pooled tests.
+                  label-permutation p over target-exon clusters; BH q over the motif family (726)
+                  or the RBP family (600).
 
 The look is inherited verbatim from v3.1 (build_rmaps_region_lollipops.py); only the layer
 inputs change. v3.1 is never modified.
@@ -42,8 +49,10 @@ SUBREGIONS = ['upstreamExon-3prime', 'upstreamExonIntron', 'upstreamIntron', 'ta
 POOLING = {'Upstream Intron': (1, 2), 'Exon Body': (3, 4), 'Downstream Intron': (5, 6)}
 RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
-BH_FAMILY = 756
-FIG_VERSION = '4.1'
+FIG_VERSION = '4.2'
+SFX = '_v42'
+RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
+                     ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
 SCORE_FIELDS = ['fg_mean_count', 'bg_mean_count', 'count_ratio', 'fg_proportion', 'bg_proportion',
                 'enrichment_ratio']
 QKI_MAP_NAME = 'SE.QKI-ACTAAC_ACG_.png'
@@ -294,8 +303,14 @@ def calibrated_entries(arm, root, mappings):
     report = json.loads((base / 'refinement_report.json').read_text())
     sources = [table, base / 'condensed_per_rbp.tsv', base / 'refinement_report.json',
                base / 'versions.txt', base / 'command.log', base / 'input_md5s.tsv', base / 'readout.md']
+    if (base / 'rbp_level.tsv').is_file():
+        sources.append(base / 'rbp_level.tsv')
+    for key in ('motif_family_size', 'rbp_family_size', 'n_unique_motifs', 'n_rbps', 'target_exons', 'events'):
+        if key not in report:
+            raise ValueError(f'{arm}: refinement_report.json lacks {key}; not a calibration v2 summary')
+    rbp_level, rbp_column = load_rbp_level(base / 'condensed_per_rbp.tsv', arm)
     log = (base / 'command.log').read_text()
-    if 'exit=0' not in log:
+    if not log_ok(base / 'command.log'):
         raise ValueError(f'Calibration run for {arm} did not record exit=0; refusing to plot a partial summary')
     rows = [r for r in read_tsv(table) if r['plot'].strip().upper() == 'TRUE']
     grouped = defaultdict(list)
@@ -317,10 +332,22 @@ def calibrated_entries(arm, root, mappings):
                         '_q': float(rep['calibrated_q']), '_native_q': float(rep['native_q']),
                         '_ratio': float(rep['enrichment_ratio']),
                         '_calib_perms_used': int(rep['calib_perms_used_pooled']),
-                        '_calib_stage': rep['calib_stage_pooled']})
+                        '_calib_stage': rep['calib_stage_pooled'],
+                        '_p_rowunit': float(rep['calibrated_p_pooled_rowunit']),
+                        '_q_rowunit': float(rep['calibrated_q_rowunit'])})
     n_motifs = len({e['motif_key'] for e in entries})
-    if len(entries) != n_motifs * 6 or len(entries) != report['bh_family_size']:
-        raise ValueError(f'Calibrated entry count {len(entries)} disagrees with BH family {report["bh_family_size"]}')
+    if len(entries) != n_motifs * 6 or n_motifs != report['n_motif_keys']:
+        raise ValueError(f'Calibrated entry count {len(entries)} != {report["n_motif_keys"]} motif keys x 6 panels')
+    if report['n_unique_motifs'] * 6 != report['motif_family_size']:
+        raise ValueError(f'{arm}: motif family {report["motif_family_size"]} != 6 x {report["n_unique_motifs"]} unique')
+    if report['n_rbps'] * 6 != report['rbp_family_size']:
+        raise ValueError(f'{arm}: RBP family {report["rbp_family_size"]} != 6 x {report["n_rbps"]} RBPs')
+    for e in entries:
+        k = (e['_calib_rbp'], e['direction_label'], e['pooled_region'])
+        if k not in rbp_level:
+            raise ValueError(f'{arm}: no RBP-level row for {k}')
+        e.update(rbp_level[k])
+    report = dict(report, rbp_level_column=rbp_column)
     apply_naming(entries, mappings)
     for e in entries:
         e['_label'] = rbp_label(e)
@@ -331,11 +358,170 @@ def calibrated_entries(arm, root, mappings):
                 raise ValueError(f'Calibrated ESRP-like name changed: {e["RBP"]} vs {expected}')
         elif ours != expected:
             raise ValueError(f'HGNC naming disagrees with the calibration summary: {ours} vs {expected}')
-        if not 0 < e['_p'] <= 1 or not 0 <= e['_q'] <= 1:
+        if not 0 < e['_p'] <= 1 or not 0 <= e['_q'] <= 1 or not 0 < e['_rbp_p'] <= 1 or not 0 <= e['_rbp_q'] <= 1:
             raise ValueError(f'Invalid calibrated p/q for {e["motif_key"]}')
         if e['_ratio'] < 0 or not math.isfinite(e['_ratio']):
             raise ValueError(f'Invalid enrichment ratio for {e["motif_key"]}')
     return entries, sources, report
+
+
+def log_ok(path):
+    """True when the last non-empty line of an append-only command.log records exit=0."""
+    path = Path(path)
+    if not path.is_file():
+        return False
+    lines = [l for l in path.read_text(encoding='utf-8', errors='replace').splitlines() if l.strip()]
+    return bool(lines) and 'exit=0' in lines[-1]
+
+
+def _num(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def load_rbp_level(table, arm):
+    """RBP-level calibrated p/q per (RBP, direction, pooled region), plotted panels only.
+
+    Primary column pair = rbp_calibrated_{p,q}_minp (min-P over the RBP's motifs inside the permutation).
+    When that pair is absent or not fully populated, fall back to rbp_calibrated_{p,q}_maxz and say so.
+    """
+    rows = [r for r in read_tsv(table) if r['plot'].strip().upper() == 'TRUE']
+    if not rows:
+        raise ValueError(f'No plotted RBP-level rows in {table}')
+    chosen = None
+    for name, pcol, qcol in RBP_LEVEL_COLUMNS:
+        if pcol in rows[0] and qcol in rows[0] and all(_num(r[pcol]) is not None and _num(r[qcol]) is not None
+                                                     for r in rows):
+            chosen = (name, pcol, qcol)
+            break
+    if chosen is None:
+        raise ValueError(f'{arm}: neither min-P nor max-z RBP-level columns are complete in {table}')
+    name, pcol, qcol = chosen
+    out = {}
+    for r in rows:
+        k = (r['RBP'], r['direction_label'], r['pooled_region'])
+        if k in out:
+            raise ValueError(f'Duplicate RBP-level row {k} in {table}')
+        out[k] = {'_rbp_p': float(r[pcol]), '_rbp_q': float(r[qcol]),
+                  '_rbp_q_minp': _num(r.get('rbp_calibrated_q_minp')),
+                  '_rbp_q_maxz': _num(r.get('rbp_calibrated_q_maxz')),
+                  '_rbp_q_meanz': _num(r.get('rbp_calibrated_q_meanz')),
+                  '_rbp_perms': int(r['rbp_calib_perms_used']), '_rbp_stage': r['rbp_calib_stage'],
+                  '_rbp_selected_motif': r['selected_motif_key'],
+                  '_n_target_exons': (int(r['n_changed_included_target_exons']),
+                                      int(r['n_changed_skipped_target_exons']))}
+    return out, name
+
+
+def length_clause(arm, root):
+    """Exon-length clause for the caveat line, read from the length-matched background run.
+
+    'changed exons are shorter than background' is printed only when the arm was measured and the
+    changed-exon median is below the background median in both directions; otherwise a neutral pointer.
+    """
+    path = Path(root) / arm / 'lengthmatched_report.json' if root else None
+    if path is None or not path.is_file():
+        return 'changed-vs-background exon length: see methods', None, 'not_measured'
+    match = json.loads(path.read_text())['length_match']
+    medians = {}
+    for d, v in match.items():
+        i = v['quantile_levels'].index(0.5)
+        medians[d] = (v['changed_length_quantiles'][i], v['bg_length_quantiles_before'][i])
+    status = 'shorter' if all(c < b for c, b in medians.values()) else 'not_shorter_in_every_direction'
+    text = ('changed exons are shorter than background (see methods)' if status == 'shorter' else
+            'changed-vs-background exon length: see methods')
+    return text, path, status + ' ' + json.dumps(medians)
+
+
+def length_sensitivity_clause(arm, root):
+    """Clause for the supplement legend from <length-root>/panel_summary_C_vs_matched.tsv.
+
+    Order unchanged = in every plotted panel, Spearman of the unmatched null vs each length-matched seed is at least
+    the seed-to-seed Spearman minus 0.05. Calls fewer = both seeds carry at least 2 fewer q<0.05 calls than the
+    unmatched null over the six panels. Arms absent from the table get no clause (no claim).
+    """
+    table = Path(root) / 'panel_summary_C_vs_matched.tsv' if root else None
+    if table is None or not table.is_file():
+        return '', None, 'not_measured'
+    rows = [r for r in read_tsv(table) if r['arm'] == arm]
+    if not rows:
+        return '', table, 'not_measured'
+    if len(rows) != 6:
+        raise ValueError(f'{arm}: expected 6 panels in {table}, found {len(rows)}')
+    unchanged = all(min(float(r['spearman_C_vs_M1']), float(r['spearman_C_vs_M2'])) >=
+                    float(r['spearman_M1_vs_M2']) - 0.05 for r in rows)
+    calls = {k: sum(int(r[f'n_q_lt_0.05_{k}']) for r in rows) for k in ('C', 'M1', 'M2')}
+    fewer = max(calls['M1'], calls['M2']) <= calls['C'] - 2
+    if not unchanged:
+        text = 'length-matched background sensitivity: order changes (see methods)'
+    else:
+        text = ('length-matched background sensitivity: order unchanged' +
+                ('; fewer q<0.05 calls' if fewer else '') + ' (see methods)')
+    rhos = [min(float(r['spearman_C_vs_M1']), float(r['spearman_C_vs_M2'])) for r in rows]
+    status = (f'order_unchanged={unchanged}; min Spearman C vs matched {min(rhos):.3f}; '
+              f'q<0.05 calls C/M1/M2 = {calls["C"]}/{calls["M1"]}/{calls["M2"]}; fewer={fewer}')
+    return text, table, status
+
+
+class _Keep(dict):
+    def __missing__(self, key):
+        return '{' + key + '}'
+
+
+DEFAULT_GATE_TEXT = ('Gate: per-sample junction reads ≥10 (no unknown category); gene baseMean >50 (genes absent from '
+                     'the DESeq2 table are kept: {n_expr_unknown_in_fg:,} foreground / {n_expr_unknown_in_bg:,} '
+                     'background events)\nForeground FDR <0.05 and |ΔPSI| ≥0.10; background FDR ≥0.5; rule {rule}')
+DEFAULT_BEFFECT_LINE = ('rule B (relaxed): frozen ±5 bp join, VAST coverage VLOW+, VAST |dPSI| ≥ 0.10, same direction; '
+                        'no MV requirement')
+DEFAULT_DIRECTION_TEXT = 'included = events whose exon is MORE included in treatment; skipped = LESS included'
+DEFAULT_TAIL_MAIN = ('Released engine commit {commit}, --stat-method {stat_method}; input event sets are md5-identical '
+                     'to every other engine run of this arm.')
+DEFAULT_TAIL_SUPP = ('Calibration seed {seed} on the same released engine run ({commit}, --stat-method {stat_method}); '
+                     'no p-value recomputed for the main figure.')
+
+
+def resolve_texts(args):
+    """Footer/legend text: command line > --gate-record JSON > the dissertation default."""
+    get = lambda name: getattr(args, name, None)
+    record = json.loads(Path(get('gate_record')).read_text(encoding='utf-8')) if get('gate_record') else {}
+    unknown = set(record) - {'gate_text', 'direction_text', 'tail_text', 'tail_text_supplement'}
+    if unknown:
+        raise ValueError(f'Unknown gate-record keys: {sorted(unknown)}')
+    texts = {'gate_text': get('gate_text') or record.get('gate_text'),
+             'direction_text': get('direction_text') or record.get('direction_text') or DEFAULT_DIRECTION_TEXT,
+             'tail_text': get('tail_text') or record.get('tail_text'),
+             'tail_text_supplement': get('tail_text_supplement') or record.get('tail_text_supplement'),
+             'commit': get('released_commit') or RELEASED_COMMIT,
+             'stat_method': get('released_stat_method') or get('stat_method') or STAT_METHOD}
+    texts['source'] = ('command line' if any([get('gate_text'), get('direction_text'), get('tail_text'),
+                                              get('tail_text_supplement')]) else
+                       f'gate record {get("gate_record")}' if record else 'dissertation default')
+    return texts
+
+
+def gate_lines(texts, arm, counts):
+    rule = arm.rsplit('_', 1)[1] if '_' in arm else ''
+    fields = _Keep(counts, rule=rule)
+    if texts['gate_text']:
+        raw = texts['gate_text'].replace('\\n', '\n').split('\n')
+    else:
+        raw = DEFAULT_GATE_TEXT.split('\n') + ([DEFAULT_BEFFECT_LINE] if rule == 'Beffect' else [])
+    lines = [line.format_map(fields) for line in raw if line.strip()]
+    if len(lines) > 3:
+        raise ValueError('Gate text allows at most three lines')
+    return lines
+
+
+def tail_line(texts, layer, refinement):
+    calibrated = layer == 'calibrated_ranksum'
+    template = ((texts['tail_text_supplement'] or texts['tail_text'] or DEFAULT_TAIL_SUPP) if calibrated else
+                (texts['tail_text'] or DEFAULT_TAIL_MAIN))
+    return template.format_map(_Keep(commit=texts.get('commit', RELEASED_COMMIT),
+                                     stat_method=texts.get('stat_method', STAT_METHOD),
+                                     seed=refinement['seed'] if refinement else 'NA'))
 
 
 def normalise_region(name):
@@ -345,7 +531,7 @@ def normalise_region(name):
 def load_motif_scores(arm, root):
     """The tool's own per-window motif scores, keyed by (direction, sub-region, motif).
 
-    Source: <calibrated-root>/<ARM>/per_motif_regions.tsv from tools/calibrate_ranksum.py, which carries the countDist
+    Source: <calibrated-root>/<ARM>/per_motif_regions.tsv from tools/calibrate_ranksum_v2.py, which carries the countDist
     numbers of the released engine run. count_ratio = fg_mean_count / bg_mean_count = hits per event
     per 50-nt window in changed events divided by the same in background events, at the window that gave
     the region's minimum p. Region names are matched case- and separator-insensitively because the
@@ -353,7 +539,7 @@ def load_motif_scores(arm, root):
     """
     table = Path(root) / arm / 'per_motif_regions.tsv'
     log = Path(root) / arm / 'command.log'
-    if not table.is_file() or not log.is_file() or 'exit=0' not in log.read_text():
+    if not table.is_file() or not log_ok(log):
         return None, None
     lookup = {}
     for row in read_tsv(table):
@@ -409,7 +595,7 @@ def load_power_label(arm, root, counts, underpowered=()):
     base = Path(root) / arm
     table = base / 'condensed_per_rbp.tsv'
     log = base / 'command.log'
-    if not table.is_file() or not log.is_file() or 'exit=0' not in log.read_text():
+    if not table.is_file() or not log_ok(log):
         return None
     rows = read_tsv(table)
     if not rows or 'power_label' not in rows[0]:
@@ -478,6 +664,14 @@ def select_panels(entries, layer, kind, top_n=10):
                 r = dict(min(group, key=rank_key))
                 r['_n'] = len(group)
                 r['_k'] = sum((x['_p'] if layer.endswith('rawP') else x['_q']) < .05 for x in group)
+                if layer == 'calibrated_ranksum':
+                    # One RBP-level p per calibration RBP; the ESRP-like group holds 12 single-motif RBPs, whose
+                    # RBP-level p equals their motif p, so its representative carries its own RBP-level value.
+                    if r['_naming_action'] != 'esrp_like_group' and len({x['_rbp_p'] for x in group}) != 1:
+                        raise ValueError(f'RBP-level p differs inside HGNC group {r["_label"]} {key}')
+                    r.update({'_motif_p': r['_p'], '_motif_q': r['_q'], '_motif_perms': r['_calib_perms_used'],
+                              '_p': r['_rbp_p'], '_q': r['_rbp_q'], '_calib_perms_used': r['_rbp_perms'],
+                              '_calib_stage': r['_rbp_stage']})
                 rows.append(r)
         else:
             for r in rows:
@@ -522,7 +716,7 @@ def truncation_text(value):
     return f'−log10 p = {value:.1f}'
 
 
-def subtitle(layer, refinement):
+def subtitle(layer, refinement, kind='byMotif'):
     if layer == 'released_ranksum_rawP':
         return ("Authors' rMAPS3 (released code " + RELEASED_COMMIT + ", --stat-method " + STAT_METHOD + "): one-sided "
                 "rank-sum on per-event motif hit counts,\nsmallest p over the 50-nt windows of each region; raw p, "
@@ -531,10 +725,15 @@ def subtitle(layer, refinement):
     stage1 = f"{refinement['stage1_permutations']:,}"
     stage2 = f"{refinement['stage2_permutations']:,}"
     floor = f"1/{refinement['stage2_permutations'] + 1:,}"
-    return (f"Same statistic, Westfall–Young permutation-calibrated p: changed/background labels permuted, min-P over "
-            f"the windows of a region.\nB = {stage1} permutations, refined to {stage2} where stage-1 p ≤ "
-            f"{refinement['refine_threshold']}; floor {floor}; BH q over {refinement['bh_family_size']} tests "
-            f"(126 motifs × 2 directions × 3 regions).\n"
+    family = (f"BH q over {refinement['rbp_family_size']} RBP-level tests ({refinement['n_rbps']} RBPs × 2 "
+              "directions × 3 regions)" if kind == 'byRBP' else
+              f"BH q over {refinement['motif_family_size']} tests ({refinement['n_unique_motifs']} unique motifs × 2 "
+              "directions × 3 regions)")
+    return (f"Same statistic, Westfall–Young permutation-calibrated p: changed/background labels permuted over "
+            f"target-exon clusters, min-P over the windows of a region"
+            + (" and over the RBP's motifs" if kind == 'byRBP' else '') + ".\n"
+            f"B = {stage1} permutations, refined to {stage2} where stage-1 p ≤ {refinement['refine_threshold']}; "
+            f"floor {floor}; {family}.\n"
             "Supplement to the main figure: how much of the released rank-sum signal survives a permutation null.")
 
 
@@ -542,7 +741,9 @@ SIZE_SENTENCE = ('Dot size = motif-score ratio (changed ÷ background, hits per 
                  "tool's own count tables)")
 
 
-def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False):
+def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kind='byMotif', texts=None,
+                caveat='', sensitivity=''):
+    direction = (texts or {}).get('direction_text') or DEFAULT_DIRECTION_TEXT
     raw = layer == 'released_ranksum_rawP'
     if raw:
         lines = ['Stem height = −log10 raw rank-sum p',
@@ -551,18 +752,27 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False):
                  'raw rank-sum p from the released tool: use for RBP ORDER only',
                  SIZE_SENTENCE, 'SIZE_KEY',
                  'Dot colour = raw rank-sum p (no multiple-testing adjustment)', None,
-                 'included = events whose exon is MORE included in treatment; skipped = LESS included',
+                 direction,
                  'stems above the cap are truncated and labelled with their value']
     else:
-        lines = ['Stem height = −log10 calibrated p',
-                 'Layer: same statistic, p from Westfall–Young label permutation (min over windows inside the '
-                 f'permutation; B = {refinement["stage1_permutations"]:,} refined to '
-                 f'{refinement["stage2_permutations"]:,}),',
-                 f'BH q over {refinement["bh_family_size"]} regional tests — permutation unit under review '
-                 '(2026-09-21): not yet reportable',
+        by_rbp = kind == 'byRBP'
+        family = (f'{refinement["rbp_family_size"]} RBP-level tests' if by_rbp else
+                  f'{refinement["motif_family_size"]} motif-level regional tests')
+        maxz = refinement['rbp_level_column'] == 'maxz'
+        colour = ('Dot colour = calibrated BH q (motif level)' if not by_rbp else
+                  'Dot colour = RBP-level calibrated BH q — RBP-level q: max-z (min-P pending)' if maxz else
+                  "Dot colour = RBP-level calibrated BH q (min-P over the RBP's motifs)")
+        lines = ['Stem height = −log10 calibrated p' + (' (RBP level)' if by_rbp else ''),
+                 'Layer: same statistic; p from label permutation over target-exon clusters (Westfall–Young, min over '
+                 'windows and, for the by-RBP figure,',
+                 "over the RBP's motifs, inside the permutation; B = "
+                 f'{refinement["stage1_permutations"]:,} refined to {refinement["stage2_permutations"]:,}); '
+                 f'BH q over {family}: these are the p and q to report',
+                 'null = exchangeability of changed target exons within the tested universe; ' + caveat,
+                 *( [sensitivity] if sensitivity else [] ),
                  SIZE_SENTENCE, 'SIZE_KEY',
-                 'Dot colour = calibrated BH q', None,
-                 'included = events whose exon is MORE included in treatment; skipped = LESS included',
+                 colour, None,
+                 direction,
                  'stems above the cap are truncated and labelled with their value']
     if open_dots:
         lines += ['an open dot means the background count was 0, so the ratio is undefined']
@@ -696,7 +906,9 @@ def draw_break(ax, x, ymax):
                 zorder=2.6, clip_on=False, solid_capstyle='butt')
 
 
-def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size_key, path, args, excluded=False):
+def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size_key, path, args, excluded=False,
+                texts=None, caveat='', target_exons=None, sensitivity=''):
+    texts = texts or resolve_texts(args)
     fig = plt.figure(figsize=(32, 28), dpi=PNG_DPI)
     fig.text(.5, .978, LABELS[arm] + ' — skipped-exon motif map', ha='center', va='top', fontsize=27, weight='bold')
     entries = [r for rows in panels.values() for r in rows]
@@ -704,7 +916,7 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
     warn = power is not None and not power['adequate']
     if warn:
         fig.text(.5, .950, power['label'], ha='center', va='top', fontsize=16, weight='bold', color='#D55E00')
-    fig.text(.5, .936 if warn else .946, subtitle(layer, refinement), ha='center', va='top', fontsize=15)
+    fig.text(.5, .936 if warn else .946, subtitle(layer, refinement, kind), ha='center', va='top', fontsize=15)
     if kind == 'byMotif':
         fig.text(.5, .900 if warn else .908, "each dot is one motif; the motif sequences are in the arm's workbook",
                  ha='center', va='top', fontsize=15)
@@ -789,22 +1001,20 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
     model.text(.052, .5, "5'", ha='right', va='center', weight='bold', fontsize=19)
     model.text(.953, .5, "3'", ha='left', va='center', weight='bold', fontsize=19)
     fig.text(.5, .280, 'skipped', ha='center', color='#0072B2', fontsize=23, weight='bold')
-    rule = arm.rsplit('_', 1)[1]
-    fig.text(.5, .249, 'Gate: per-sample junction reads ≥10 (no unknown category); gene baseMean >50 '
-             f'(genes absent from the DESeq2 table are kept: {counts["n_expr_unknown_in_fg"]:,} foreground / '
-             f'{counts["n_expr_unknown_in_bg"]:,} background events)', ha='center', fontsize=14, color='#555555')
-    fig.text(.5, .225, f'Foreground FDR <0.05 and |ΔPSI| ≥0.10; background FDR ≥0.5; rule {rule}  |  '
-             f'n events (rMATS SE rows) included={counts["n_up"]:,} / skipped={counts["n_dn"]:,} / '
-             f'background={counts["n_bg"]:,}', ha='center', fontsize=14, color='#555555')
-    if rule == 'Beffect':
-        fig.text(.5, .208, 'rule B (relaxed): frozen ±5 bp join, VAST coverage VLOW+, VAST |dPSI| ≥ 0.10, '
-                 'same direction; no MV requirement', ha='center', fontsize=14, color='#555555')
-    draw_legend(fig, layer, refinement, size_key, bool(open_dot_rows), excluded=excluded)
-    tail = ('Released engine commit ' + RELEASED_COMMIT + ', --stat-method ' + STAT_METHOD +
-            '; input event sets are md5-identical to every other engine run of this arm.' if not calibrated else
-            f'Calibration seed {refinement["seed"]} on the same released engine run ({RELEASED_COMMIT}, '
-            f'--stat-method {STAT_METHOD}); no p-value recomputed for the main figure.')
-    fig.text(.5, .030, tail, ha='center', fontsize=14, color='#555555')
+    lines = gate_lines(texts, arm, counts)
+    n_line = (f'n events (rMATS SE rows) included={counts["n_up"]:,} / skipped={counts["n_dn"]:,} / '
+              f'background={counts["n_bg"]:,}')
+    if target_exons:
+        n_line += (f' over {target_exons["up"]:,} / {target_exons["dn"]:,} / {target_exons["bg"]:,} '
+                   'target exons')
+    fig.text(.5, .249, lines[0], ha='center', fontsize=14, color='#555555')
+    fig.text(.5, .225, (lines[1] + '  |  ' if len(lines) > 1 else '') + n_line, ha='center', fontsize=14,
+             color='#555555')
+    if len(lines) > 2:
+        fig.text(.5, .208, lines[2], ha='center', fontsize=14, color='#555555')
+    draw_legend(fig, layer, refinement, size_key, bool(open_dot_rows), excluded=excluded, kind=kind, texts=texts,
+                caveat=caveat, sensitivity=sensitivity)
+    fig.text(.5, .012, tail_line(texts, layer, refinement), ha='center', fontsize=14, color='#555555')
     report = layout_audit(fig, axes, model_artists, path, ymax, max_value)
     report.update({'layer': layer, 'kind': kind, 'arm': arm, 'excluded': excluded,
                    'refined_entries': sum(r['_calib_perms_used'] > refinement['stage1_permutations']
@@ -865,7 +1075,10 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
     for l in v4_layers:
         fields += [f'{l}_p', f'{l}_rank', f'{l}_motif', f'{l}_top10']
         if l == 'calibrated_ranksum':
-            fields += ['calibrated_ranksum_q', 'calibrated_ranksum_native_p', 'calib_perms_used', 'calib_stage']
+            fields += ['calibrated_ranksum_q', 'rbp_level_column', 'calibrated_motif_p_cluster',
+                       'calibrated_motif_q_cluster', 'calibrated_p_rowunit', 'calibrated_q_rowunit',
+                       'rbp_calibrated_q_minp', 'rbp_calibrated_q_maxz', 'rbp_calibrated_q_meanz',
+                       'calibrated_ranksum_native_p', 'calib_perms_used', 'calib_stage']
         fields += [f'{l}_selected_sub_region'] + [f'{l}_{f}' for f in SCORE_FIELDS]
     for l in prior_layers:
         fields += [f'v3.1_{l}_p', f'v3.1_{l}_rank']
@@ -899,6 +1112,14 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                                f'{l}_motif': r['motif_key'], f'{l}_top10': int(name in top_sets[l])})
                 if l == 'calibrated_ranksum':
                     record.update({'calibrated_ranksum_q': float(r['_q']),
+                                   'rbp_level_column': refinement['rbp_level_column'],
+                                   'calibrated_motif_p_cluster': float(r['_motif_p']),
+                                   'calibrated_motif_q_cluster': float(r['_motif_q']),
+                                   'calibrated_p_rowunit': float(r['_p_rowunit']),
+                                   'calibrated_q_rowunit': float(r['_q_rowunit']),
+                                   'rbp_calibrated_q_minp': r['_rbp_q_minp'],
+                                   'rbp_calibrated_q_maxz': r['_rbp_q_maxz'],
+                                   'rbp_calibrated_q_meanz': r['_rbp_q_meanz'],
                                    'calibrated_ranksum_native_p': float(r['_native_p']),
                                    'calib_perms_used': r['_calib_perms_used'], 'calib_stage': r['_calib_stage']})
                 record[f'{l}_selected_sub_region'] = r['region']
@@ -928,8 +1149,10 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                               mean_rho=float(np.mean(valid)) if valid else None,
                               mean_top10_overlap=float(np.mean([r['top10_overlap'] for r in rows])),
                               n_panels=len(rows), n_defined_rho_panels=len(valid)))
-    write_tsv(dest / f'{arm}_rank_comparison_v4.tsv', fields, ranks)
-    write_tsv(dest / f'{arm}_rank_panel_comparisons_v4.tsv', list(comparisons[0]), comparisons)
+    write_tsv(dest / f'{arm}_rank_comparison_v42.tsv', fields, ranks)
+    comparison_fields = ['arm', 'direction', 'pooled_region', 'layer1', 'layer2', 'n_rbps', 'rho', 'rho_status',
+                         'top10_overlap', 'top10_n_layer1', 'top10_n_layer2']
+    write_tsv(dest / f'{arm}_rank_panel_comparisons_v42.tsv', comparison_fields, comparisons)
     method_rows = []
     if method_tsv and Path(method_tsv).is_file():
         wide = defaultdict(dict)
@@ -961,6 +1184,18 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                                 'counts are the maps/ directory named by --author-maps-root. Blank '
                                 'means the background count was 0, so the ratio is undefined and the figure draws an '
                                 'open dot. No value here is recomputed.'),
+        ('Calibrated columns (v4.2)', 'calibrated_ranksum_p / _q / _rank are the plotted by-RBP statistic: the '
+                                      'RBP-level calibrated p and BH q over the RBP family (100 RBPs x 2 directions x '
+                                      '3 regions = 600), from the column pair named in rbp_level_column (minp = min-P '
+                                      'over the RBP\'s motifs inside the permutation, the primary; maxz = max-z, used '
+                                      'only while the min-P pair is absent). calibrated_motif_p_cluster / _q_cluster: '
+                                      'the selected motif\'s motif-level p and BH q, target-exon cluster permutation, '
+                                      'family 726 (121 unique motifs x 2 x 3). calibrated_p_rowunit / _q_rowunit: the '
+                                      'same motif under the v1 rMATS-row permutation unit, family 756, kept for '
+                                      'comparison only. rbp_calibrated_q_minp / _maxz / _meanz: the three RBP-level q '
+                                      'columns side by side (NA when that column is not in the calibration summary). '
+                                      'Source: <calibrated-root>/<ARM>/{per_motif_regions,'
+                                      'condensed_per_rbp}.tsv. Nothing is recomputed.'),
         ('Sheet: Panel comparisons', 'Spearman rho of the paired average-rank vectors and top-10 overlap for every '
                                      'layer pair inside one panel; rho is NA when a rank vector is constant.'),
         ('Sheet: Summary', 'Arithmetic mean of rho and of top-10 overlap over the six panels; '
@@ -976,13 +1211,20 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                   '(no exclusion list applied); all HGNC-grouped RBPs.'),
     ]
     methods = [
+        ('Permutation null (v4.2)', 'Exchangeability of changed target exons within the tested universe: '
+                                    'changed/background labels are permuted over target-exon clusters (chr, strand, '
+                                    'exonStart, exonEnd), size-matched, so duplicate rMATS rows of one exon move '
+                                    'together. Changed and background exons can differ in length; see the length-'
+                                    'matched background sensitivity (--length-root) when it was run.'),
         ('Layer 1 statistic', f"Released rMAPS3 at commit {RELEASED_COMMIT} run with --stat-method {STAT_METHOD}: a "
                               'one-sided Mann-Whitney rank-sum test on per-event motif hit counts, taking the smallest '
                               'p over the 50-nt windows of a region. Raw p; the tool applies no adjustment.'),
         ('Layer 2 statistic', f'The same statistic with a Westfall-Young min-P label-permutation p '
                               f'(B = {refinement["stage1_permutations"]}, refined to '
                               f'{refinement["stage2_permutations"]} where stage-1 p <= {refinement["refine_threshold"]}'
-                              f', seed {refinement["seed"]}) and BH q over {refinement["bh_family_size"]} tests.'
+                              f', seed {refinement["seed"]}; unit = target-exon cluster) with BH q over '
+                              f'{refinement["motif_family_size"]} motif-level tests and, at RBP level, over '
+                              f'{refinement["rbp_family_size"]} RBP-level tests.'
                               if refinement else 'Not built for this arm; the calibration summary was absent.'),
         ('Why the rank-sum p is so small', 'The ranked unit is one observation per eligible exon per window. With more '
                                            'than 99% of exons carrying no motif hit, the tie correction collapses the '
@@ -1014,7 +1256,7 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
     _sheet(book, 'Summary', ('arm', 'layer1', 'layer2', 'mean_rho', 'mean_top10_overlap', 'n_panels',
                              'n_defined_rho_panels'), summaries)
     _sheet(book, 'Ranks', fields, ranks, freeze='D2')
-    _sheet(book, 'Panel comparisons', list(comparisons[0]), comparisons)
+    _sheet(book, 'Panel comparisons', comparison_fields, comparisons)
     if method_rows:
         _sheet(book, 'Method comparison', list(method_rows[0]), method_rows, freeze='E2')
     sheet = _sheet(book, 'Methods', ('topic', 'definition'), [dict(topic=k, definition=v) for k, v in methods])
@@ -1028,7 +1270,7 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
 
 
 # ---------------------------------------------------------------- index
-def write_index(out, records, skipped, archive_name, author_maps_root=None):
+def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_archive_name=None):
     parts = [f'<!doctype html><html lang="en"><meta charset="utf-8">'
              f'<title>rMAPS3 rank-sum motif maps (v{FIG_VERSION})</title>'
              '<style>body{font:16px Arial;margin:30px;line-height:1.5;max-width:1500px}'
@@ -1051,26 +1293,31 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None):
              'reports no enrichment ratio. No multiple-testing adjustment is applied, because none is part of the '
              'tool. The p-values come from the tie-corrected normal approximation and are anti-conservative in the '
              'sparse tail; the RBP order is the claim.</p>',
-             '<p class="supp"><b>SUPPLEMENT — permutation-calibrated rank-sum.</b> The same statistic with its p '
-             'recalibrated by Westfall\u2013Young label permutation (min-P over the windows of a region), and a BH q '
-             'over the ' + str(BH_FAMILY) + ' pooled tests. Stems and ranking use the calibrated p, colour uses the '
-             'calibrated q, and dot size shows the enrichment ratio the calibration summary provides. This says how '
-             'much of the main figure\u2019s signal survives a permutation null of the same statistic.</p>',
+             '<p class="supp"><b>SUPPLEMENT — permutation-calibrated rank-sum (calibration v2).</b> The same '
+             'statistic with its p recalibrated by Westfall\u2013Young label permutation over target-exon clusters '
+             '(min-P over the windows of a region and, for the by-RBP figure, over the RBP\u2019s motifs, inside the '
+             'permutation; B = 2,000 refined to 100,000). By-motif figures: stem = motif-level calibrated p, colour = '
+             'BH q over 726 motif-level tests. By-RBP figures: stem, rank and colour = the RBP-level calibrated p and '
+             'BH q over 600 RBP-level tests. These are the p and q to report. Null = exchangeability of changed '
+             'target exons within the tested universe. Dot size is the tool\u2019s motif-score ratio, as on the main '
+             'layer.</p>',
              '<p>Included stems rise, skipped stems hang down, and the six panels of one figure share a y-scale. '
              'Best motifs are chosen after HGNC grouping; the twelve synthetic ESRP-like hexamers form one group. '
              'The <code>_noSpliceosome_noBroad</code> variants drop the lab core-spliceosome and broad-binder lists '
              'and always retain SRSF1. The authors\u2019 Fisher default and our audited Fisher-binary layer are not '
              'plotted here; they remain as comparison columns in each arm\u2019s rank workbook and in the archived '
              'version 3.1 figures.</p>',
-             f'<p><a href="{archive_name}/index.html">Archived version 3.1 index (Fisher layers)</a> · '
-             '<a href="naming_audit_v4.tsv">Naming audit</a> · <a href="selection_audit_v4.tsv">Selections</a> · '
-             '<a href="exclusion_audit_v4.tsv">Exclusions</a> · '
+             '<p>' + (f'<a href="{v41_archive_name}/index.html">Archived version 4.1 index</a> · '
+                      if v41_archive_name else '') +
+             f'<a href="{archive_name}/index.html">Archived version 3.1 index (Fisher layers)</a> · '
+             '<a href="naming_audit_v42.tsv">Naming audit</a> · <a href="selection_audit_v42.tsv">Selections</a> · '
+             '<a href="exclusion_audit_v42.tsv">Exclusions</a> · '
              '<a href="positive_control_audit.tsv">QKI positive controls</a> · '
-             '<a href="rank_agreement_summary_v4.tsv">Rank agreement</a> · '
-             '<a href="y_scale_audit_v4.tsv">Y-scale caps</a> · '
-             '<a href="power_label_audit_v4.tsv">Power labels</a> · '
-             '<a href="truncation_audit_v4.tsv">Truncated stems</a> · '
-             '<a href="figures_manifest_v4.tsv">Manifest (includes skipped layers)</a></p>']
+             '<a href="rank_agreement_summary_v42.tsv">Rank agreement</a> · '
+             '<a href="y_scale_audit_v42.tsv">Y-scale caps</a> · '
+             '<a href="power_label_audit_v42.tsv">Power labels</a> · '
+             '<a href="truncation_audit_v42.tsv">Truncated stems</a> · '
+             '<a href="figures_manifest_v42.tsv">Manifest (includes skipped layers)</a></p>']
     if skipped:
         parts.append('<h2>Layers not built</h2><table><tr><th>Arm</th><th>Layer</th><th>Missing input</th></tr>' +
                      ''.join(f'<tr><td>{html.escape(s["arm"])}</td><td>{html.escape(s["layer"])}</td>'
@@ -1085,10 +1332,14 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None):
     for rec in records:
         arm = rec['arm']
         c = rec['counts']
+        te = rec.get('target_exons')
         parts.append(f'<section><h2>{html.escape(LABELS[arm])}</h2>'
-                     f'<p>Included {c["n_up"]:,}; skipped {c["n_dn"]:,}; background {c["n_bg"]:,}. '
-                     'Foreground FDR &lt;0.05 and |ΔPSI| ≥0.10; background FDR ≥0.5; per-sample junction reads ≥10; '
-                     'gene baseMean &gt;50.</p>')
+                     f'<p>Events (rMATS SE rows): included {c["n_up"]:,}; skipped {c["n_dn"]:,}; background '
+                     f'{c["n_bg"]:,}' + (f'; over {te["up"]:,} / {te["dn"]:,} / {te["bg"]:,} target exons' if te else '')
+                     + '. ' + html.escape(' '.join(rec['gate_lines'])) + '</p>'
+                     + (f'<p>By-RBP supplement colour and stem: RBP-level column <b>{rec["rbp_level_column"]}</b>'
+                        + (' (min-P pending; max-z fallback)' if rec['rbp_level_column'] == 'maxz' else '') + '.</p>'
+                        if rec.get('rbp_level_column') else ''))
         power = rec['power']
         if power is not None and not power['adequate']:
             parts.append(f'<p class="warn">{html.escape(power["label"])} — printed under the title on every '
@@ -1131,20 +1382,20 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None):
                              f'<img loading="lazy" src="{rel}{QKI_MAP_NAME}" alt="{arm} {QKI_MAP_NAME}"></a>'
                              '<p>authors’ rMAPS3 per-motif map, unmodified</p></article>')
         parts.append(f'<p><a href="{arm}/{arm}_rank_comparison.xlsx">Rank workbook (.xlsx)</a> · '
-                     f'<a href="{arm}/{arm}_rank_comparison_v4.tsv">Ranks TSV</a> · '
-                     f'<a href="{arm}/{arm}_figure_provenance_v4.md">Provenance sidecar</a></p></section>')
+                     f'<a href="{arm}/{arm}_rank_comparison_v42.tsv">Ranks TSV</a> · '
+                     f'<a href="{arm}/{arm}_figure_provenance_v42.md">Provenance sidecar</a></p></section>')
     (out / 'index.html').write_text('\n'.join(parts + ['</html>']), encoding='utf-8')
 
 
 # ---------------------------------------------------------------- main
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=f'rMAPS3 SE rank-sum lollipops, version {FIG_VERSION}')
     ap.add_argument('--arms', nargs='+', required=True)
     ap.add_argument('--out-root', required=True)
     ap.add_argument('--released-root', required=True,
                     help='root holding <arm>/pVal.{up,dn}.vs.bg.RNAmap.txt from the released engine')
     ap.add_argument('--calibrated-root', required=True,
-                    help='root holding <arm>/per_motif_regions.tsv from tools/calibrate_ranksum.py')
+                    help='root holding <arm>/per_motif_regions.tsv from tools/calibrate_ranksum_v2.py (calibration v2 schema; v1 row-unit summaries are refused)')
     ap.add_argument('--method-comparison', default=None,
                     help='optional method_rank_comparison.tsv from tools/compare_stat_methods.py')
     ap.add_argument('--archive-name', default='_v3.1_archive_2026-09-17')
@@ -1174,13 +1425,31 @@ def main():
     ap.add_argument('--released-stat-method', default=STAT_METHOD)
     ap.add_argument('--gate', default='persample10_bm50_bgfdr0.5')
     ap.add_argument('--top-n', type=int, default=10)
-    args = ap.parse_args()
+    ap.add_argument('--gate-text', default=None,
+                    help='footer gate sentence; up to 3 lines separated by \\n; placeholders {rule}, {n_up}, {n_dn}, '
+                         '{n_bg}, {n_expr_unknown_in_fg}, {n_expr_unknown_in_bg}. Default: the dissertation '
+                         'reli_v121 gate text (DEFAULT_GATE_TEXT, plus DEFAULT_BEFFECT_LINE for rule Beffect)')
+    ap.add_argument('--direction-text', default=None,
+                    help='legend direction line; default DEFAULT_DIRECTION_TEXT')
+    ap.add_argument('--tail-text', default=None,
+                    help='bottom tail line, both layers unless --tail-text-supplement is given; placeholders '
+                         '{commit}, {stat_method}, {seed}. Default DEFAULT_TAIL_MAIN / DEFAULT_TAIL_SUPP')
+    ap.add_argument('--tail-text-supplement', default=None, help='tail line for the supplement layer only')
+    ap.add_argument('--gate-record', default=None,
+                    help='JSON with any of gate_text, direction_text, tail_text, tail_text_supplement; '
+                         'command-line flags take precedence')
+    ap.add_argument('--length-root', default=None,
+                    help='root holding <arm>/lengthmatched_report.json for the exon-length caveat clause')
+    ap.add_argument('--v41-archive-name', default=None,
+                    help='folder name of an archived v4.1 index to link from index.html')
+    args = ap.parse_args(argv)
     args.counts_json = dict(pair.split('=', 1) for pair in args.counts_json)
     for pair in args.arm_label:
         arm, _, text = pair.partition('=')
         LABELS[arm] = text
     for arm in args.arms:
         LABELS.setdefault(arm, arm.replace('_', ' '))
+    texts = resolve_texts(args)
     out = Path(args.out_root)
     out.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({'font.family': 'Arial', 'svg.fonttype': 'none', 'svg.hashsalt': 'rmaps-v4',
@@ -1189,10 +1458,10 @@ def main():
     if unknown:
         raise ValueError(f'Missing arm labels: {sorted(unknown)}')
     mappings, naming_rows, naming_stats = load_naming(args.naming_table, args.esrp_table, args.gtf, args.alias_table)
-    write_tsv(out / 'naming_audit_v4.tsv',
+    write_tsv(out / 'naming_audit_v42.tsv',
               ['table_name', 'hgnc_symbol', 'source', 'evidence', 'ambiguity_note', 'n_motifs', 'merged_into'],
               naming_rows)
-    (out / 'naming_report_v4.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
+    (out / 'naming_report_v42.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
     lists = {'spliceosome_census': load_exclusion_list(args.spliceosome_list),
              'broad_binders': load_exclusion_list(args.broad_binders_list)}
     aliases = naming_stats['alias_mappings']
@@ -1225,7 +1494,7 @@ def main():
         calib_path = Path(args.calibrated_root) / arm / 'per_motif_regions.tsv'
         calib_log = calib_path.with_name('command.log')
         if (calib_path.is_file() and calib_path.with_name('refinement_report.json').is_file()
-                and calib_log.is_file() and 'exit=0' in calib_log.read_text()):
+                and log_ok(calib_log)):
             entries, calib_sources, report = calibrated_entries(arm, args.calibrated_root, mappings)
             layers['calibrated_ranksum'] = entries
             sources += calib_sources
@@ -1250,6 +1519,21 @@ def main():
         scales = {layer: y_scale(entries, layer) for layer, entries in layers.items()}
         size_rows.append({'arm': arm, **{k: v for k, v in size_key.items()}})
         power = load_power_label(arm, args.calibrated_root, counts, args.underpowered_arms)
+        caveat, length_source, length_status = length_clause(arm, args.length_root)
+        if length_source:
+            sources.append(length_source)
+        sensitivity, sens_source, sens_status = length_sensitivity_clause(arm, args.length_root)
+        if sens_source and sens_status != 'not_measured':
+            sources.append(sens_source)
+        target_exons = None
+        if refinement:
+            ev = refinement['events']
+            if (ev['up'], ev['dn'], ev['bg']) != (counts['n_up'], counts['n_dn'], counts['n_bg']):
+                raise ValueError(f'{arm}: calibration event counts {ev} disagree with counts.json')
+            target_exons = dict(refinement['target_exons'])
+            per_rbp = {e['_n_target_exons'] for e in layers['calibrated_ranksum']}
+            if per_rbp != {(target_exons['up'], target_exons['dn'])}:
+                raise ValueError(f'{arm}: target-exon counts disagree between summary tables: {per_rbp}')
         if power is None:
             skipped.append({'arm': arm, 'layer': 'power_label',
                             'file': str(Path(args.calibrated_root) / arm / 'condensed_per_rbp.tsv'),
@@ -1272,6 +1556,9 @@ def main():
                         for panel in [('INCLUDED', 'Upstream Intron'), ('SKIPPED', 'Downstream Intron')]:
                             first = panels[panel][0]
                             controls.append({'arm': arm, 'layer': layer, 'variant': variant, 'kind': kind,
+                                             'statistic': ('raw rank-sum p' if layer == LAYERS[0] else
+                                                           f'RBP-level calibrated ({refinement["rbp_level_column"]})'
+                                                           if kind == 'byRBP' else 'motif-level calibrated (cluster)'),
                                              'panel': ' × '.join(panel), 'first': first['_label'],
                                              'first_p': first['_p'], 'first_q': first['_q'],
                                              'pass': first['_label'] == 'QKI'})
@@ -1286,11 +1573,13 @@ def main():
                                            'enrichment_ratio': None if layer == LAYERS[0] else r['_ratio'],
                                            'k_sig_motifs': r['_k'], 'n_motifs_in_group': r['_n'],
                                            'hgnc_symbol': r['_hgnc_symbol'], 'naming_action': r['_naming_action'],
-                                           'calib_perms_used': r['_calib_perms_used'], 'calib_stage': r['_calib_stage']})
+                                           'calib_perms_used': r['_calib_perms_used'], 'calib_stage': r['_calib_stage'],
+                                           'motif_level_p': r.get('_motif_p'), 'motif_level_q': r.get('_motif_q')})
         for (variant, kind, layer), panels in sorted(selections.items()):
             stem = dest / (f'{arm}_SE_{kind}_{layer}' + ('' if variant == 'main' else '_' + variant))
             report = draw_figure(arm, layer, kind, panels, counts, refinement, scales[layer], power, size_key,
-                                 stem, args, excluded=variant != 'main')
+                                 stem, args, excluded=variant != 'main', texts=texts, caveat=caveat,
+                                 target_exons=target_exons, sensitivity=sensitivity)
             layouts.append(report)
             for row in report['truncated_stems']:
                 truncation_rows.append({'arm': arm, 'layer': layer, 'variant': variant, 'kind': kind,
@@ -1320,7 +1609,7 @@ def main():
                     'Power is adequate, so no label is drawn on the figures.'))
                 if power else
                 '- Statistical power: no power_label in the calibration summary for this arm; no label drawn and '
-                'the gap recorded in figures_manifest_v4.tsv.',
+                'the gap recorded in figures_manifest_v42.tsv.',
                 f'- Layers skipped for this arm: '
                 f'{", ".join(s["layer"] for s in skipped if s["arm"] == arm) or "none"}.',
                 f'- Gate {args.gate}, rule {arm.rsplit("_", 1)[1]}: included {counts["n_up"]}, '
@@ -1345,16 +1634,39 @@ def main():
                 'min(targetExon-5prime, targetExon-3prime); Downstream Intron = min(downstreamIntron, '
                 'downstreamExonIntron). The two flanking-exon sub-regions are not plotted.']
         if refinement:
-            prov += [f'- SUPPLEMENT layer calibrated_ranksum: same statistic; Westfall-Young min-P label permutation, '
-                     f'seed {refinement["seed"]}, stage 1 B = {refinement["stage1_permutations"]}, stage 2 B = '
-                     f'{refinement["stage2_permutations"]} for stage-1 p <= {refinement["refine_threshold"]} '
-                     f'({refinement["pairs_refined"]} of {refinement["pairs_total"]} motif-direction pairs refined, '
-                     f'{refinement["pairs_deferred_by_cap"]} deferred by cap); BH q over '
-                     f'{refinement["bh_family_size"]} tests; permutation floor '
+            prov += [f'- SUPPLEMENT layer calibrated_ranksum (calibration v2, {args.calibrated_root}): same statistic; '
+                     f'Westfall-Young min-P label permutation over target-exon clusters '
+                     f'({refinement["permutation_unit"]}), seed {refinement["seed"]}, stage 1 B = '
+                     f'{refinement["stage1_permutations"]}, stage 2 B = {refinement["stage2_permutations"]} for '
+                     f'stage-1 p <= {refinement["refine_threshold"]} ({refinement["unique_pairs_promoted_motif_level"]} '
+                     f'of {refinement["unique_pairs_total"]} unique motif-direction pairs promoted; '
+                     f'{refinement["rbp_directions_promoted"]} RBP-directions promoted); permutation floor '
                      f'1/{refinement["stage2_permutations"] + 1}.',
-                     '- Stem and rank on the supplement use the calibrated p; colour uses the calibrated BH q; dot '
-                     'size uses the enrichment ratio supplied by the calibration summary. This follows the v3.1 '
-                     'calibrated-layer convention.']
+                     f'- byMotif supplement: stem and rank = motif-level cluster calibrated p; colour = calibrated_q, BH '
+                     f'over {refinement["motif_family_size"]} tests ({refinement["n_unique_motifs"]} unique motifs x 2 x '
+                     '3; keys sharing a k-mer carry the same result).',
+                     f'- byRBP supplement: best motif per HGNC group chosen by motif-level calibrated p as in v4.1 (it '
+                     'sets the dot size and tick); stem, rank and colour = the RBP-level calibrated p and q from '
+                     f'condensed_per_rbp.tsv column pair "{refinement["rbp_level_column"]}" '
+                     + ('(min-P over the RBP\'s motifs inside the permutation, the primary)'
+                        if refinement['rbp_level_column'] == 'minp' else
+                        '(max-z FALLBACK: the min-P pair was absent or incomplete at build time; the legend says '
+                        '"RBP-level q: max-z (min-P pending)")')
+                     + f', BH over {refinement["rbp_family_size"]} tests ({refinement["n_rbps"]} RBPs x 2 x 3). The '
+                     'ESRP-like group holds 12 single-motif calibration RBPs; its representative carries its own '
+                     'RBP-level value, which equals its motif p, so the group is not jointly calibrated.',
+                     f'- Counted units: events (rMATS SE rows) {counts["n_up"]}/{counts["n_dn"]}/{counts["n_bg"]} over '
+                     f'target exons {target_exons["up"]}/{target_exons["dn"]}/{target_exons["bg"]} '
+                     '(included/skipped/background), from refinement_report.json and checked against counts.json.',
+                     f'- Caveat clause on the supplement legend: "{caveat}"; length status {length_status}; source '
+                     f'{length_source or "none for this arm"}.',
+                     '- Length-matched sensitivity clause: "'
+                     + (sensitivity or 'none drawn (arm not in the length-matched run)') + '"; '
+                     + sens_status + '; source '
+                     + (str(sens_source) if sens_status != 'not_measured' else 'none') + '. '
+                     'The sensitivity run used the motif-level target-exon-cluster null (treatment C, BH over 756), '
+                     'not the RBP-level families; rule: order unchanged when every panel keeps Spearman(C, matched) '
+                     '>= seed-to-seed Spearman - 0.05; "fewer q<0.05 calls" when both seeds lose >= 2 calls.']
         if crosschecked:
             prov.append(f'- Cross-check: the native rank-sum p of all {crosschecked} pooled tests in the calibration '
                         'summary equals the released root table value to a relative tolerance of 1e-9, so both layers '
@@ -1365,11 +1677,11 @@ def main():
                  'descending, then sub-region name.',
                  '- byRBP: best motif per HGNC group by layer p, ties by enrichment ratio descending then display '
                  'label then motif key. No k/n numerals are drawn on any figure; the per-group significant-motif '
-                 'counts are in selection_audit_v4.tsv.',
+                 'counts are in selection_audit_v42.tsv.',
                  '- Tick labels: HGNC group everywhere, except that byMotif panels label the twelve synthetic '
                  'ESRP-like hexamers by sequence, because they carry no gene name and would otherwise repeat the '
                  'same word. Ranking is unaffected: it uses the group label, not the tick label. Every drawn tick '
-                 'label is recorded in selection_audit_v4.tsv.',
+                 'label is recorded in selection_audit_v42.tsv.',
                  '- Naming: display and grouping use the supplied HGNC alias table, otherwise the exact GENCODE v49 '
                  'gene_name. Mappings: ' + '; '.join(f'{n} → {s}' for n, s in naming_stats['alias_mappings'].items()) +
                  '. HGNC-ambiguous aliases: 9G8 (SRSF7/SLU7; supplied resolution SRSF7) and SRp40 (SRSF5/NOLC1; '
@@ -1383,7 +1695,7 @@ def main():
                  'minimum 4; raw p: a 1/2/2.5/5/10 scale). When that cap already exceeds the largest value nothing '
                  'is truncated and the limit is the plain rounded maximum. Stems above the cap are drawn to the cap, '
                  'carry a two-diagonal axis-break glyph and have their exact value printed beside the dot; the '
-                 'legend box says so. Every truncated stem is listed in truncation_audit_v4.tsv. Included up, '
+                 'legend box says so. Every truncated stem is listed in truncation_audit_v42.tsv. Included up, '
                  'skipped down; gene model between the rows.']
         for layer in sorted(scales):
             s = scales[layer]
@@ -1397,30 +1709,34 @@ def main():
                  'out-of-bounds audit.',
                  '- Source SHA256:']
         prov += [f'  - {str(p)}: {digest(p, "sha256")}' for p in sources]
-        (dest / f'{arm}_figure_provenance_v4.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
-        (dest / 'command_v4.log').write_text(
+        (dest / f'{arm}_figure_provenance_v42.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
+        (dest / 'command_v42.log').write_text(
             ' '.join([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]) + '\n', encoding='utf-8')
-        (dest / 'versions_v4.txt').write_text(
+        (dest / 'versions_v42.txt').write_text(
             f'Python\t{sys.version.split()[0]}\nmatplotlib\t{matplotlib.__version__}\n'
             f'openpyxl\t{openpyxl.__version__}\nnumpy\t{np.__version__}\nPNG_DPI\t{PNG_DPI}\n', encoding='utf-8')
         for layer, s in sorted(scales.items()):
             scale_rows.append({'arm': arm, 'layer': layer, **s})
-        records.append({'arm': arm, 'counts': counts, 'layers': sorted(layers), 'rank_summary': summaries,
+        records.append({'arm': arm, 'target_exons': target_exons, 'gate_lines': gate_lines(texts, arm, counts),
+                        'rbp_level_column': refinement['rbp_level_column'] if refinement else None,
+                        'length_status': length_status, 'sensitivity': sensitivity or 'none', 'counts': counts, 'layers': sorted(layers),
+                        'rank_summary': summaries,
                         'scales': scales, 'power': power})
         print(f'OK {arm}: layers={sorted(layers)} figures={len(selections)}', flush=True)
-    write_index(out, records, skipped, args.archive_name, args.author_maps_root)
+    write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name)
     if controls:
         write_tsv(out / 'positive_control_audit.tsv', list(controls[0]), controls)
-    write_tsv(out / 'selection_audit_v4.tsv', list(audits[0]), audits)
-    write_tsv(out / 'exclusion_audit_v4.tsv', list(exclusion_rows[0]), exclusion_rows)
-    write_tsv(out / 'rank_agreement_summary_v4.tsv', list(rank_summary[0]), rank_summary)
-    write_tsv(out / 'y_scale_audit_v4.tsv', list(scale_rows[0]), scale_rows)
+    write_tsv(out / 'selection_audit_v42.tsv', list(audits[0]), audits)
+    write_tsv(out / 'exclusion_audit_v42.tsv', list(exclusion_rows[0]), exclusion_rows)
+    write_tsv(out / 'rank_agreement_summary_v42.tsv', ['arm', 'layer1', 'layer2', 'mean_rho', 'mean_top10_overlap',
+                                                         'n_panels', 'n_defined_rho_panels'], rank_summary)
+    write_tsv(out / 'y_scale_audit_v42.tsv', list(scale_rows[0]), scale_rows)
     if power_rows:
-        write_tsv(out / 'power_label_audit_v4.tsv', list(power_rows[0]), power_rows)
-    write_tsv(out / 'dot_size_audit_v4.tsv', list(size_rows[0]), size_rows)
+        write_tsv(out / 'power_label_audit_v42.tsv', list(power_rows[0]), power_rows)
+    write_tsv(out / 'dot_size_audit_v42.tsv', list(size_rows[0]), size_rows)
     if open_dot_rows:
-        write_tsv(out / 'open_dot_audit_v4.tsv', list(open_dot_rows[0]), open_dot_rows)
-    write_tsv(out / 'truncation_audit_v4.tsv',
+        write_tsv(out / 'open_dot_audit_v42.tsv', list(open_dot_rows[0]), open_dot_rows)
+    write_tsv(out / 'truncation_audit_v42.tsv',
               ['arm', 'layer', 'variant', 'kind', 'shared_ymax', 'direction', 'pooled_region', 'rank', 'label',
                'tick', 'motif_key', 'log10p', 'printed'],
               truncation_rows or [{'arm': 'NONE', 'layer': 'NONE', 'variant': 'NONE', 'kind': 'NONE',
@@ -1428,22 +1744,26 @@ def main():
                                    'label': 'NA', 'tick': 'NA', 'motif_key': 'NA', 'log10p': 'NA',
                                    'printed': 'no stem exceeded its cap in this build'}])
     if universe_rows:
-        write_tsv(out / 'rank_universe_notes_v4.tsv', list(universe_rows[0]), universe_rows)
-    (out / 'layout_report_v4.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
+        write_tsv(out / 'rank_universe_notes_v42.tsv', list(universe_rows[0]), universe_rows)
+    (out / 'layout_report_v42.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
     for s in skipped:
-        manifest_rows.append({'arm': s['arm'], 'layer': s['layer'], 'status': 'skipped_input_missing',
+        manifest_rows.append({'arm': s['arm'], 'rbp_level_column': 'NA', 'layer': s['layer'],
+                              'status': 'skipped_input_missing',
                               'file': s['file'], 'bytes': 'NA', 'md5': 'NA'})
+    rbp_cols = {rec['arm']: rec['rbp_level_column'] or 'NA' for rec in records}
     built = {p for rec in records for p in (out / rec['arm']).rglob('*')}
     built |= {p for p in out.glob('*') if p.is_file()}
     for p in sorted(built):
-        if not p.is_file() or p.name == 'figures_manifest_v4.tsv':
+        if not p.is_file() or p.name == 'figures_manifest_v42.tsv':
             continue
         layer = next((l for l in LAYERS if l in p.name), 'ALL')
-        manifest_rows.append({'arm': p.parent.name if p.parent != out else 'ALL', 'layer': layer,
+        arm_name = p.parent.name if p.parent != out else 'ALL'
+        manifest_rows.append({'arm': arm_name, 'rbp_level_column': rbp_cols.get(arm_name, 'NA'), 'layer': layer,
                               'status': 'built', 'file': str(p.resolve()), 'bytes': p.stat().st_size,
                               'md5': digest(p)})
-    write_tsv(out / 'figures_manifest_v4.tsv', ['arm', 'layer', 'status', 'file', 'bytes', 'md5'], manifest_rows)
-    print(f'OK v4 index, audits, layout report and manifest: {out}', flush=True)
+    write_tsv(out / 'figures_manifest_v42.tsv', ['arm', 'rbp_level_column', 'layer', 'status', 'file', 'bytes', 'md5'],
+              manifest_rows)
+    print(f'OK v4.2 index, audits, layout report and manifest: {out}', flush=True)
     if skipped:
         print('SKIPPED LAYERS: ' + '; '.join(f'{s["arm"]}/{s["layer"]}' for s in skipped), flush=True)
 

@@ -132,3 +132,32 @@ Note (2026-09-17): the two-stage permutation refinement (100,000 fresh permutati
   `tools/verify_ranksum_archives.py` (archive the released per-exon counts and prove they reproduce the released
   p-values), `tools/calibrate_ranksum.py` (the supplement), `tools/build_region_lollipops_v4.py` (the figures).
   Every one of these tools takes its roots as arguments; none carries a lab path.
+
+## Addendum (September 22, 2026): calibration v2.1, the permutation unit and the RBP-level statistic
+
+- **Duplicate target exons make the rMATS row an invalid permutation unit.** rMATS calls one cassette exon as
+  several SE rows when it pairs with different flanking exons. Those rows carry bit-identical motif counts in the
+  target-exon and adjacent intronic windows, so permuting rows splits an observation the data never split and
+  the null is too narrow. Example, QKI_KO_B: RBP x panel calls at q < 0.05 fall from 10 under the row unit to 4
+  under the target-exon cluster unit, and QKI stays first in both control panels.
+- **Cluster permutation keeps every row.** `tools/calibrate_ranksum_v2.py` leaves the released statistic and its
+  input untouched and makes the target exon (chr, strand, exonStart, exonEnd) the unit of exchangeability in the
+  null only: duplicate rows move together and each draw keeps the observed foreground's cluster-size
+  composition. It is the reportable p and q.
+- **Deduplicating is not the fix.** Keeping one row per target exon changes the observed statistic, and the choice
+  of representative changes the flanking-exon-dependent windows (upstream and downstream exon edges), so the
+  released root tables are no longer reproduced.
+- **Max-z over motifs penalises an RBP whose second motif has a heavier null tail; min-P does not.** Max-z is a
+  max-T statistic over motifs whose null z distributions differ, so one motif with a wide null drags the RBP down.
+  Min-P turns each motif's statistic into its own tail count inside the same permutations, weighting motifs
+  equally. Min-P is the RBP-level primary; max-z and mean-z stay as sensitivity columns.
+- **Duplicate k-mers are tested once.** Motif keys listed under several RBP names with one k-mer are one test,
+  verified bit-identical and mapped back to every carrier; the motif-level BH family counts unique k-mers only.
+- **A length-matched background did not change the RBP order.** Where it thinned the calls, a random background
+  of the same size lost the same calls, so background size, not exon length, is the confound. Report it as a
+  sensitivity; it is not the null.
+- **Both-way exons are kept.** A target exon present in both changed foregrounds stays in both, as the released
+  tool does, and its count is reported in `refinement_report.json`.
+- **Tool order now:** `calibrate_ranksum.py --permutation-unit row` (sensitivity only), then
+  `calibrate_ranksum_v2.py --rowunit-root ...` (reportable), then `build_region_lollipops_v4.py` (figure version
+  4.2, which refuses v1 summaries). `tools/rmaps3_skill_run.py --mode full` runs all three.
