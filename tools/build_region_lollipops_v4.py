@@ -8,6 +8,11 @@ Everything else is v4.2.
 v4.3.1 (2026-09-23): on the q-coloured supplement the ramp ends at the smallest q observed in the arm for
 that family (RBP-level q for byRBP, motif-level q for byMotif, over the unexcluded entries), labelled
 '(floor in this arm)'; a BH q cannot reach the permutation p floor. Arms with no q < 0.05 keep the p floor.
+v4.3.2 (2026-09-23): visibly graded ramp. OKLab lightness runs from the tint (L 0.90-0.92) to a darkened hue at
+L 0.40 (hue fixed, chroma rising, inside sRGB); the ramp position is piecewise linear in -log10 s, anchored at the
+key ticks 0.05 / 0.01 / 0.001 / end at fixed shared positions, so adjacent key ticks differ by CIEDE2000 >= 15 and
+grey vs the 0.05 tint by >= 20 (asserted at build time; table colour_contrast_v432.tsv). The legend bars are drawn
+on the ramp position.
 
 v4.2 (2026-09-22) over v4.1: the supplement reads calibration v2 (target-exon cluster permutation,
 tools/calibrate_ranksum_v2.py); by-motif colour = motif-level cluster q (family 726); by-RBP stem, rank and
@@ -58,7 +63,7 @@ SUBREGIONS = ['upstreamExon-3prime', 'upstreamExonIntron', 'upstreamIntron', 'ta
 POOLING = {'Upstream Intron': (1, 2), 'Exon Body': (3, 4), 'Downstream Intron': (5, 6)}
 RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
-FIG_VERSION = '4.3.1'
+FIG_VERSION = '4.3.2'
 SFX = '_v43'
 RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
@@ -719,12 +724,67 @@ def _to_hex(rgb):
     return '#' + ''.join(f'{round(min(1.0, max(0.0, v)) * 255):02X}' for v in rgb)
 
 
-def depth_fraction(s, floor):
-    """0 at s = 0.05 (tint), 1 at s <= floor (full hue); linear in -log10 s."""
+# v4.3.2: darkened end of the ramp (OKLab L), shared key-tick anchors and their ramp positions. The positions
+# maximise the smallest CIEDE2000 between adjacent key ticks over both hues (gold chroma is gamut-limited at low
+# lightness, so equal spacing leaves the 0.05 -> 0.01 step below 15).
+DARK_END_L = 0.40
+GAMUT_MARGIN = 0.98
+KEY_TICK_VALUES = (0.05, 0.01, 0.001)
+KEY_TICK_MIN_GAP = 0.15  # log10 units: an intermediate tick closer than this to the ramp end is not an anchor
+KEY_POSITIONS = {2: (0.0, 1.0), 3: (0.0, 0.5, 1.0), 4: (0.0, 0.38, 0.68, 1.0)}
+DE_ADJACENT_MIN = 15.0
+DE_GREY_TINT_MIN = 20.0
+
+
+def _max_chroma(L, h):
+    lo, hi = 0.0, 0.4
+    for _ in range(50):
+        m = (lo + hi) / 2
+        if all(-1e-9 <= v <= 1 + 1e-9 for v in oklch_to_rgb(L, m, h)):
+            lo = m
+        else:
+            hi = m
+    return lo
+
+
+def ramp_endpoints(direction):
+    """(L_tint, C_tint, L_end, C_end, hue): tint from the RBP-RELI first stop, end = darkened full hue."""
+    _, Cf, hf = hex_to_oklch(DIRECTION_HUE[direction])
+    Lt, Ct, _ = hex_to_oklch(DIRECTION_TINT_SOURCE[direction])
+    return Lt, Ct, DARK_END_L, min(Cf, GAMUT_MARGIN * _max_chroma(DARK_END_L, hf)), hf
+
+
+def ramp_rgb(direction, t):
+    """Unclipped sRGB at ramp position t in [0, 1]: L linear, chroma rising as 1 - (1 - t)^2, hue fixed."""
+    Lt, Ct, Le, Ce, h = ramp_endpoints(direction)
+    return oklch_to_rgb(Lt + t * (Le - Lt), Ct + (Ce - Ct) * (1 - (1 - t) ** 2), h)
+
+
+def ramp_hex(direction, t):
+    return _to_hex(ramp_rgb(direction, t))
+
+
+def key_anchors(floor):
+    """[(value, ramp position)]: 0.05, the key ticks clearly above the end, then the end (floor/cap)."""
     lo, hi = -math.log10(SIG_ALPHA), -math.log10(floor)
     if hi <= lo:
         raise ValueError(f'Colour-ramp floor {floor} is not below {SIG_ALPHA}')
-    return min(1.0, max(0.0, (-math.log10(s) - lo) / (hi - lo)))
+    values = [SIG_ALPHA] + [v for v in KEY_TICK_VALUES[1:] if hi + math.log10(v) >= KEY_TICK_MIN_GAP] + [floor]
+    return list(zip(values, KEY_POSITIONS[len(values)]))
+
+
+def depth_fraction(s, floor):
+    """Ramp position: 0 at s = 0.05, 1 at s <= floor; piecewise linear in -log10 s between the key anchors."""
+    anchors = key_anchors(floor)
+    xs = [-math.log10(v) for v, _ in anchors]
+    ts = [t for _, t in anchors]
+    x = -math.log10(s)
+    if x <= xs[0]:
+        return 0.0
+    for x0, x1, t0, t1 in zip(xs, xs[1:], ts, ts[1:]):
+        if x <= x1:
+            return t0 + (t1 - t0) * (x - x0) / (x1 - x0)
+    return 1.0
 
 
 def significance_colour(direction, s, floor):
@@ -733,26 +793,90 @@ def significance_colour(direction, s, floor):
         raise ValueError(f'Colour needs a finite positive significance value, got {s!r}')
     if s >= SIG_ALPHA:
         return NS_GREY
-    t = depth_fraction(s, floor)
-    if t >= 1.0:
-        return DIRECTION_HUE[direction]
-    Lf, Cf, hf = hex_to_oklch(DIRECTION_HUE[direction])
-    Lt, Ct, _ = hex_to_oklch(DIRECTION_TINT_SOURCE[direction])
-    return _to_hex(oklch_to_rgb(Lt + t * (Lf - Lt), Ct + t * (Cf - Ct), hf))
+    return ramp_hex(direction, depth_fraction(s, floor))
 
 
 def ramp_check(direction, n=256):
     """Lightness monotone and every step inside sRGB before rounding; returns (monotone, in_gamut, tint_hex)."""
-    Lf, Cf, hf = hex_to_oklch(DIRECTION_HUE[direction])
-    Lt, Ct, _ = hex_to_oklch(DIRECTION_TINT_SOURCE[direction])
     Ls, ok = [], True
     for i in range(n):
-        t = i / (n - 1)
-        rgb = oklch_to_rgb(Lt + t * (Lf - Lt), Ct + t * (Cf - Ct), hf)
+        rgb = ramp_rgb(direction, i / (n - 1))
         ok &= all(-1e-6 <= v <= 1 + 1e-6 for v in rgb)
         Ls.append(hex_to_oklch(_to_hex(rgb))[0])
     mono = all(b <= a + 1e-9 for a, b in zip(Ls, Ls[1:]))
-    return mono, ok, _to_hex(oklch_to_rgb(Lt, Ct, hf))
+    return mono, ok, ramp_hex(direction, 0.0)
+
+
+def hex_to_cielab(hx):
+    """sRGB hex -> CIELAB, D65 white."""
+    r, g, b = (_srgb_to_linear(int(hx[i:i + 2], 16) / 255) for i in (1, 3, 5))
+    X = .4124564 * r + .3575761 * g + .1804375 * b
+    Y = .2126729 * r + .7151522 * g + .0721750 * b
+    Z = .0193339 * r + .1191920 * g + .9503041 * b
+    f = lambda t: t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
+    fx, fy, fz = f(X / .95047), f(Y), f(Z / 1.08883)
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def delta_e2000_lab(lab1, lab2):
+    """CIEDE2000 (Sharma, Wu & Dalal 2005), kL = kC = kH = 1."""
+    (L1, a1, b1), (L2, a2, b2) = lab1, lab2
+    Cb = (math.hypot(a1, b1) + math.hypot(a2, b2)) / 2
+    G = .5 * (1 - math.sqrt(Cb ** 7 / (Cb ** 7 + 25 ** 7)))
+    a1p, a2p = (1 + G) * a1, (1 + G) * a2
+    C1p, C2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
+    h1p = math.degrees(math.atan2(b1, a1p)) % 360 if C1p else 0.0
+    h2p = math.degrees(math.atan2(b2, a2p)) % 360 if C2p else 0.0
+    dL, dC = L2 - L1, C2p - C1p
+    if C1p * C2p == 0:
+        dh = 0.0
+    else:
+        dh = h2p - h1p
+        if dh > 180:
+            dh -= 360
+        elif dh < -180:
+            dh += 360
+    dH = 2 * math.sqrt(C1p * C2p) * math.sin(math.radians(dh / 2))
+    Lbp, Cbp = (L1 + L2) / 2, (C1p + C2p) / 2
+    if C1p * C2p == 0:
+        hbp = h1p + h2p
+    elif abs(h1p - h2p) <= 180:
+        hbp = (h1p + h2p) / 2
+    elif h1p + h2p < 360:
+        hbp = (h1p + h2p + 360) / 2
+    else:
+        hbp = (h1p + h2p - 360) / 2
+    T = (1 - .17 * math.cos(math.radians(hbp - 30)) + .24 * math.cos(math.radians(2 * hbp))
+         + .32 * math.cos(math.radians(3 * hbp + 6)) - .20 * math.cos(math.radians(4 * hbp - 63)))
+    dth = 30 * math.exp(-((hbp - 275) / 25) ** 2)
+    Rc = 2 * math.sqrt(Cbp ** 7 / (Cbp ** 7 + 25 ** 7))
+    Sl = 1 + .015 * (Lbp - 50) ** 2 / math.sqrt(20 + (Lbp - 50) ** 2)
+    Sc, Sh = 1 + .045 * Cbp, 1 + .015 * Cbp * T
+    Rt = -math.sin(math.radians(2 * dth)) * Rc
+    return math.sqrt((dL / Sl) ** 2 + (dC / Sc) ** 2 + (dH / Sh) ** 2 + Rt * (dC / Sc) * (dH / Sh))
+
+
+def delta_e2000(hex1, hex2):
+    return delta_e2000_lab(hex_to_cielab(hex1), hex_to_cielab(hex2))
+
+
+def contrast_rows(floor):
+    """CIEDE2000 grey vs the 0.05 tint and between adjacent key ticks, both hues, with pass flags."""
+    rows = []
+    anchors = key_anchors(floor)
+    for d in DIRECTION_HUE:
+        tint = ramp_hex(d, 0.0)
+        de = delta_e2000(NS_GREY, tint)
+        rows.append({'direction': d, 'from': 'grey (>= 0.05)', 'to': '0.05 tint', 'from_hex': NS_GREY,
+                     'to_hex': tint, 'from_position': 'NA', 'to_position': 0.0, 'delta_e2000': round(de, 3),
+                     'target': DE_GREY_TINT_MIN, 'pass': de >= DE_GREY_TINT_MIN})
+        for (v0, t0), (v1, t1) in zip(anchors, anchors[1:]):
+            h0, h1 = ramp_hex(d, t0), ramp_hex(d, t1)
+            de = delta_e2000(h0, h1)
+            rows.append({'direction': d, 'from': f'{v0:.6g}', 'to': f'{v1:.6g}', 'from_hex': h0, 'to_hex': h1,
+                         'from_position': t0, 'to_position': t1, 'delta_e2000': round(de, 3),
+                         'target': DE_ADJACENT_MIN, 'pass': de >= DE_ADJACENT_MIN})
+    return rows
 
 
 def colour_floor(layer, refinement, scale, q_floor=None):
@@ -796,6 +920,8 @@ def draw_colour_key(fig, layer, refinement, scale, legend_top=.198, q_floor=None
         monotone, in_gamut, _ = ramp_check(d)
         if not (monotone and in_gamut):
             raise ValueError(f'Colour ramp for {d} is not monotone in lightness or leaves sRGB')
+    if not all(row['pass'] for row in contrast_rows(floor)):
+        raise ValueError(f'Key-tick CIEDE2000 below target for ramp end {floor}')
     raw = layer == 'released_ranksum_rawP'
     symbol = 'p' if raw else 'q'
     height_pt = 176
@@ -809,27 +935,23 @@ def draw_colour_key(fig, layer, refinement, scale, legend_top=.198, q_floor=None
     ax.text(.04, height_pt - 16, ('Dot colour: raw rank-sum p' if raw else 'Dot colour: calibrated BH q'),
             fontsize=14, va='center')
     x0, x1 = .30, .95
-    lo, hi = -math.log10(SIG_ALPHA), -math.log10(floor)
-    grid = np.linspace(lo, hi, 256)
+    grid = np.linspace(0.0, 1.0, 256)
     bar_y = {'INCLUDED': height_pt - 46, 'SKIPPED': height_pt - 72}
     for d, y in bar_y.items():
-        rgb = [mcolors_to_rgb(significance_colour(d, max(10 ** -v, floor), floor)) if v > lo else
-               mcolors_to_rgb(significance_colour(d, SIG_ALPHA * (1 - 1e-12), floor)) for v in grid]
+        rgb = [mcolors_to_rgb(ramp_hex(d, t)) for t in grid]
         ax.imshow(np.array([rgb]), extent=(x0, x1, y - 9, y + 9), aspect='auto', interpolation='nearest',
                   zorder=2)
         ax.add_patch(Rectangle((x0, y - 9), x1 - x0, 18, facecolor='none', edgecolor='#333333', lw=.6, zorder=3))
         ax.text(x0 - .03, y, d.lower(), ha='right', va='center', fontsize=14, weight='bold',
                 color=DIRECTION_HUE[d])
-    ticks = [(SIG_ALPHA, '0.05', 0), (0.01, '0.01', 1), (0.001, '0.001', 2)]
     tick_top = bar_y['SKIPPED'] - 9
-    for value, label, row in ticks:
-        if value < floor:
-            continue
-        x = x0 + (x1 - x0) * (-math.log10(value) - lo) / (hi - lo)
-        ax.plot([x, x], [tick_top, tick_top - 4 - 15 * row], color='#333333', lw=.6, zorder=3)
-        ax.text(x, tick_top - 11 - 15 * row, label, ha='center', va='center', fontsize=12)
-    ax.plot([x1, x1], [tick_top, tick_top - 4 - 45], color='#333333', lw=.6, zorder=3)
-    ax.text(x1 - .01, tick_top - 11 - 45, floor_label(layer, refinement, scale, q_floor), ha='right', va='center', fontsize=12)
+    for value, t in key_anchors(floor)[:-1]:
+        x = x0 + (x1 - x0) * t
+        ax.plot([x, x], [tick_top, tick_top - 4], color='#333333', lw=.6, zorder=3)
+        ax.text(x, tick_top - 11, f'{value:g}', ha='center', va='center', fontsize=12)
+    ax.plot([x1, x1], [tick_top, tick_top - 4 - 15], color='#333333', lw=.6, zorder=3)
+    ax.text(x1 - .01, tick_top - 11 - 15, floor_label(layer, refinement, scale, q_floor), ha='right', va='center',
+            fontsize=12)
     grey_y = 18
     ax.scatter([.07], [grey_y], s=140, marker='o', color=NS_GREY, edgecolor='#333333', linewidth=.7)
     ax.text(.11, grey_y, f'{symbol} ≥ 0.05 (not significant)', fontsize=14, va='center')
@@ -1880,9 +2002,14 @@ def main(argv=None):
                         'describe the same statistic.')
         prov += ['- No p-value or q-value is recomputed by this script. Colour (v4.3): hue = direction, included '
                  '#E69F00 and skipped #0072B2 (RBP-RELI INCL_GOLD / SKIP_BLUE, build_region_resolved_lollipop.py); '
-                 'value >= 0.05 = Okabe-Ito grey #999999; below 0.05 the colour runs in OKLCh with the hue fixed, '
-                 'lightness and chroma linear in -log10 value, from a tint (lightness/chroma of the RBP-RELI ramp '
-                 'first stop #F4E3B8 / #CDE3F2, giving #FBE0B9 / #CFE2F3) at 0.05 to the full hue at the floor. '
+                 'value >= 0.05 = Okabe-Ito grey #999999; below 0.05 the colour runs in OKLCh with the hue fixed '
+                 '(v4.3.2): lightness from the tint (lightness/chroma of the RBP-RELI ramp first stop #F4E3B8 / '
+                 f'#CDE3F2, giving #FBE0B9 / #CFE2F3) at 0.05 to a darkened hue at OKLab L {DARK_END_L} at the floor '
+                 f'({ramp_hex("INCLUDED", 1.0)} / {ramp_hex("SKIPPED", 1.0)}), chroma rising; the ramp position is '
+                 'piecewise linear in -log10 value between the key ticks 0.05 / 0.01 / 0.001 / floor, which sit at '
+                 'fixed ramp positions (4 anchors 0, 0.38, 0.68, 1; 3 anchors 0, 0.5, 1), so adjacent key ticks differ '
+                 f'by CIEDE2000 >= {DE_ADJACENT_MIN:g} and grey vs the 0.05 tint by >= {DE_GREY_TINT_MIN:g} '
+                 '(colour_contrast_v432.tsv). '
                  'Value = calibrated q on the supplement (v4.3.1: the ramp ends at the smallest q observed in '
                  f'the arm for the figure family: byRBP {q_floors.get("byRBP", "NA")}, byMotif '
                  f'{q_floors.get("byMotif", "NA")}; the permutation p floor only when no q < 0.05) and raw '
@@ -1969,6 +2096,19 @@ def main(argv=None):
         bad = [row for row in colour_rows if not row['pass']]
         if bad:
             raise ValueError(f'Colour audit failed on {len(bad)} dots')
+    contrast, seen = [], set()
+    for rep_ in layouts:
+        key = (rep_['arm'], rep_['layer'], rep_['kind'], rep_['colour_floor'])
+        if key in seen:
+            continue
+        seen.add(key)
+        contrast += [{'arm': key[0], 'layer': key[1], 'kind': key[2], 'ramp_end': key[3], **row}
+                     for row in contrast_rows(key[3])]
+    if contrast:
+        write_tsv(out / 'colour_contrast_v432.tsv', list(contrast[0]), contrast)
+        bad = [row for row in contrast if not row['pass']]
+        if bad:
+            raise ValueError(f'Colour contrast below target on {len(bad)} key-tick pairs')
     (out / 'layout_report_v43.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
     for s in skipped:
         manifest_rows.append({'arm': s['arm'], 'rbp_level_column': 'NA', 'layer': s['layer'],

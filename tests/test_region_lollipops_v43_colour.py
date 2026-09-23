@@ -17,11 +17,11 @@ def test_hues_are_the_rbp_reli_gold_and_blue():
 
 
 @pytest.mark.parametrize("direction", ["INCLUDED", "SKIPPED"])
-def test_grey_at_and_above_alpha_full_hue_at_floor(direction):
+def test_grey_at_and_above_alpha_ramp_end_at_floor(direction):
     assert lol.significance_colour(direction, 0.05, FLOOR) == lol.NS_GREY
     assert lol.significance_colour(direction, 0.7, FLOOR) == lol.NS_GREY
-    assert lol.significance_colour(direction, FLOOR, FLOOR) == lol.DIRECTION_HUE[direction]
-    assert lol.significance_colour(direction, FLOOR / 10, FLOOR) == lol.DIRECTION_HUE[direction]
+    assert lol.significance_colour(direction, FLOOR, FLOOR) == lol.ramp_hex(direction, 1.0)
+    assert lol.significance_colour(direction, FLOOR / 10, FLOOR) == lol.ramp_hex(direction, 1.0)
 
 
 @pytest.mark.parametrize("direction", ["INCLUDED", "SKIPPED"])
@@ -52,7 +52,7 @@ def test_non_finite_significance_is_refused():
 def test_q_ramp_ends_at_the_arm_q_floor_not_the_permutation_floor():
     refinement, scale = {"stage2_permutations": 100_000}, {"ymax": 6}
     assert lol.colour_floor("calibrated_ranksum", refinement, scale, 0.003) == 0.003
-    assert lol.significance_colour("SKIPPED", 0.003, 0.003) == lol.DIRECTION_HUE["SKIPPED"]
+    assert lol.significance_colour("SKIPPED", 0.003, 0.003) == lol.ramp_hex("SKIPPED", 1.0)
     assert lol.floor_label("calibrated_ranksum", refinement, scale, 0.003) == "≤ 0.0030 (floor in this arm)"
     # no q < 0.05 in the arm: fall back to the permutation p floor
     assert lol.colour_floor("calibrated_ranksum", refinement, scale, 0.2) == FLOOR
