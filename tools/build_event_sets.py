@@ -163,7 +163,13 @@ def build_sets(source, gates, expression):
                       "baseMean": None if unknown_expr else bm, "foreground": fg, "background_before_collision": bg})
     if not records:
         raise ValueError("Empty rMATS table")
-    evaluable = [r for r in audit if r["orientation_evaluable"]]
+    # A row whose rMATS IncLevelDifference is exactly 0.000 is a TIE, not an orientation
+    # disagreement: sign(0) can never equal the sign of a nonzero recomputed delta, so such
+    # a row is scored as disagreeing however the data are oriented. rMATS rounds that column
+    # to 3 decimals, so ties accumulate with COHORT SIZE, not with data quality: spaceflight
+    # 6v6 and 9v10 units sat at 0.89-0.94 here while agreeing on 100% of nonzero-dPSI rows.
+    # Ties are excluded from BOTH denominators; a genuine orientation flip still trips this.
+    evaluable = [r for r in audit if r["orientation_evaluable"] and r["informative"]]
     informative = [r for r in audit if r["informative"]]
     if not evaluable or not informative or sum(r["orientation_agrees"] for r in evaluable) / len(evaluable) <= .95 or sum(r["orientation_agrees"] for r in informative) / len(informative) <= .95:
         raise ValueError("Global orientation agreement must exceed 95% for evaluable and nonzero-dPSI events")
