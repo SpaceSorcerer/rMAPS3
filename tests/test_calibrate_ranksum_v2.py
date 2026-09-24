@@ -281,6 +281,7 @@ def test_cli_defaults_are_the_locked_two_stage_scheme():
 
 def test_readme_carries_the_reportable_null_and_no_review_wording():
     report = {"motif_family_size": 726, "n_unique_motifs": 121, "n_motif_keys": 126, "rbp_family_size": 600,
+              "motif_bh_divisor": 726, "rbp_bh_divisor": {"minp": 600, "maxz": 600, "meanz": 600},
               "duplicate_kmers": [{"kmer": "TGGTGG", "carrier_keys": "ESRP1.TGGTGG,motif_1.TGGTGG"}],
               "stage1_permutations": 2000, "stage2_permutations": 100000, "refine_threshold": 0.005,
               "seed": 149}

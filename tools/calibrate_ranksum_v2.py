@@ -282,13 +282,18 @@ def run_arm(args, emit):
     del null2
 
     motif_family = [(k, d, p) for k in kmers for d in ("up", "dn") for p in io.PLOT_POOLS]
-    motif_q = dict(zip(motif_family, (float(q) for q in calib.bh_adjust(
-        [final[(k, d)][p]["calibrated_p"] for k, d, p in motif_family]))))
+    motif_q_values, motif_divisor = calib.bh_adjust(
+        [final[(k, d)][p]["calibrated_p"] for k, d, p in motif_family], return_divisor=True)
+    motif_q = dict(zip(motif_family, (float(q) for q in motif_q_values)))
     rbp_family = [(r, d, p) for r in rbps for d in ("up", "dn") for p in io.PLOT_POOLS]
-    rbp_q = {s: dict(zip(rbp_family, (float(q) for q in calib.bh_adjust(
-        [rbp_final[k]["p_" + s] for k in rbp_family])))) for s in ("max", "mean", "minp")}
-    emit("BH families: motif level {} = {} unique motifs x 2 x 3; RBP level {} = {} RBPs x 2 x 3"
-         .format(len(motif_family), len(kmers), len(rbp_family), len(rbps)))
+    rbp_q, rbp_divisor = {}, {}
+    for s in ("max", "mean", "minp"):
+        values, rbp_divisor[s] = calib.bh_adjust([rbp_final[k]["p_" + s] for k in rbp_family], return_divisor=True)
+        rbp_q[s] = dict(zip(rbp_family, (float(q) for q in values)))
+    emit("BH divisors (testable cells actually used): motif level {} of {} = {} unique motifs x 2 x 3 ({} "
+         "untestable); RBP level min-P {} of {} = {} RBPs x 2 x 3 ({} untestable)".format(
+             motif_divisor, len(motif_family), len(kmers), len(motif_family) - motif_divisor,
+             rbp_divisor["minp"], len(rbp_family), len(rbps), len(rbp_family) - rbp_divisor["minp"]))
 
     counts = {"n_changed_included": n_rows["up"], "n_changed_skipped": n_rows["dn"],
               "n_changed_included_target_exons": n_target["up"],
@@ -325,6 +330,7 @@ def run_arm(args, emit):
                     "n_fg_exons": m["n1"], "n_bg_exons": m["n0"],
                     "n_fg_target_exons": n_target[d], "n_bg_target_exons": n_target["bg"],
                     "calibrated_q": motif_q.get((kmer, d, pool), math.nan),
+                    "untestable": not math.isfinite(pooled["calibrated_p"]),
                     "unique_motif_id": kmer, "unique_motif_representative_key": carriers[0],
                     "n_keys_sharing_motif": len(carriers),
                     "rbps_sharing_motif": ",".join(sorted({alias.get(lib.table_name_of(c), lib.table_name_of(c))
@@ -368,6 +374,7 @@ def run_arm(args, emit):
                     "native_q_at_selected_region": effect_row["native_q"],
                     "calibrated_p": final[(kmer, d)][pool]["calibrated_p"],
                     "calibrated_q": motif_q.get((kmer, d, pool), math.nan),
+                    "untestable": not math.isfinite(final[(kmer, d)][pool]["calibrated_p"]),
                     "calib_perms_used": final[(kmer, d)][pool]["permutations"],
                     "calib_stage": motif_stage[(kmer, d)],
                     "native_argmin_position": effect_row["native_argmin_position"],
@@ -384,6 +391,7 @@ def run_arm(args, emit):
                     "rbp_calibrated_q_maxz": rbp_q["max"].get((rbp, d, pool), math.nan),
                     "rbp_calibrated_p_minp": fin["p_minp"],
                     "rbp_calibrated_q_minp": rbp_q["minp"].get((rbp, d, pool), math.nan),
+                    "rbp_untestable": not math.isfinite(fin["p_minp"]),
                     "rbp_minp_motif_key": (next(k for k in rbp_keys if lib.kmer_of(k) == fin["minp_kmer"])
                                            if fin["minp_kmer"] else "NA"),
                     "rbp_observed_mean_z": obs["mean"], "rbp_calibrated_p_meanz": fin["p_mean"],
@@ -436,6 +444,12 @@ def run_arm(args, emit):
         "n_redundant_keys": len(motifs) - len(kmers),
         "redundant_motif_tests_removed": (len(motifs) - len(kmers)) * 2 * len(io.PLOT_POOLS),
         "motif_family_size": len(motif_family), "rbp_family_size": len(rbp_family), "n_rbps": len(rbps),
+        "motif_bh_divisor": motif_divisor,
+        "rbp_bh_divisor": {"minp": rbp_divisor["minp"], "maxz": rbp_divisor["max"], "meanz": rbp_divisor["mean"]},
+        "motif_untestable_cells": len(motif_family) - motif_divisor,
+        "rbp_untestable_cells": {"minp": len(rbp_family) - rbp_divisor["minp"],
+                                 "maxz": len(rbp_family) - rbp_divisor["max"],
+                                 "meanz": len(rbp_family) - rbp_divisor["mean"]},
         "unique_pairs_total": len(stage1), "unique_pairs_promoted_motif_level": len(motif_promoted),
         "rbp_directions_promoted": len(rbp_promoted), "stage2_pairs_run": len(needed),
         "stage1_wall_seconds": stage1_seconds, "stage2_wall_seconds": stage2_seconds,
@@ -444,8 +458,8 @@ def run_arm(args, emit):
         "target_exons_in_both_changed_foregrounds": both_way_target,
         "event_rows_in_both_changed_foregrounds": both_way_rows,
         "stage2_p_floor": 1.0 / (1.0 + stage2_perms),
-        "singleton_bh_q_floor_motif": min(1.0, len(motif_family) / (1.0 + stage2_perms)),
-        "singleton_bh_q_floor_rbp": min(1.0, len(rbp_family) / (1.0 + stage2_perms)),
+        "singleton_bh_q_floor_motif": min(1.0, motif_divisor / (1.0 + stage2_perms)),
+        "singleton_bh_q_floor_rbp": min(1.0, rbp_divisor["minp"] / (1.0 + stage2_perms)),
         "max_calibrated_p_among_q_lt_0.05": {
             "motif": max([final[k[:2]][k[2]]["calibrated_p"] for k in motif_family if motif_q[k] < 0.05],
                          default=None),
@@ -471,7 +485,7 @@ PER_MOTIF_COLUMNS = [
     "calib_perms_used_pooled", "calib_stage_pooled", "calib_pooled_reason",
     "n_fg_exons", "n_bg_exons", "n_fg_carrying", "n_bg_carrying",
     "fg_proportion", "bg_proportion", "enrichment_ratio", "fg_mean_count", "bg_mean_count", "count_ratio",
-    "native_q", "calibrated_q", "n_fg_target_exons", "n_bg_target_exons", "unique_motif_id",
+    "native_q", "calibrated_q", "untestable", "n_fg_target_exons", "n_bg_target_exons", "unique_motif_id",
     "unique_motif_representative_key", "n_keys_sharing_motif", "rbps_sharing_motif",
     "calibrated_p_rowunit", "calibrated_p_pooled_rowunit", "calibrated_q_rowunit",
 ]
@@ -480,12 +494,12 @@ CONDENSED_COLUMNS = [
     "n_changed_included_target_exons", "n_changed_skipped_target_exons", "permutation_unit",
     "RBP", "rbp_table_names", "direction", "direction_label", "pooled_region", "plot",
     "selected_motif_key", "selected_native_region", "native_ranksum_p", "native_q_at_selected_region",
-    "calibrated_p", "calibrated_q", "calib_perms_used", "calib_stage", "native_argmin_position",
+    "calibrated_p", "calibrated_q", "untestable", "calib_perms_used", "calib_stage", "native_argmin_position",
     "n_fg_exons", "n_bg_exons", "n_fg_carrying", "n_bg_carrying",
     "fg_proportion", "bg_proportion", "enrichment_ratio", "fg_mean_count", "bg_mean_count", "count_ratio",
     "n_motifs_total", "n_motifs_calib_q_lt_0.05", "n_motifs_native_q_lt_0.05",
     "n_unique_motifs", "n_fg_target_exons", "n_bg_target_exons",
-    "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_minp_motif_key",
+    "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_untestable", "rbp_minp_motif_key",
     "rbp_observed_max_z", "rbp_max_z_motif_key", "rbp_calibrated_p_maxz", "rbp_calibrated_q_maxz",
     "rbp_observed_mean_z", "rbp_calibrated_p_meanz", "rbp_calibrated_q_meanz",
     "rbp_calib_perms_used", "rbp_calib_stage",
@@ -497,7 +511,7 @@ RBP_LEVEL_COLUMNS = [
     "n_changed_included_target_exons", "n_changed_skipped_target_exons",
     "RBP", "rbp_table_names", "direction", "direction_label", "pooled_region", "plot",
     "n_unique_motifs", "unique_motifs",
-    "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_minp_motif_key", "rank_rbp_minp",
+    "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_untestable", "rbp_minp_motif_key", "rank_rbp_minp",
     "rbp_observed_max_z", "rbp_max_z_motif_key", "rbp_calibrated_p_maxz", "rbp_calibrated_q_maxz", "rank_rbp_maxz",
     "rbp_observed_mean_z", "rbp_calibrated_p_meanz", "rbp_calibrated_q_meanz", "rank_rbp_meanz",
     "rbp_calib_perms_used", "rbp_calib_stage",
@@ -551,9 +565,15 @@ def readme_rows(report, alias_table, rowunit_root):
                              "(per_motif) or pooled region (condensed). Normal approximation; order only."),
         ("calibrated_p", "Motif level: permutation p of the released regional minimum under the target-exon "
                          "cluster permutation."),
-        ("calibrated_q", "Motif level: Benjamini-Hochberg over unique motifs x 2 directions x 3 plotted pooled "
-                         "regions ({} = {} x 2 x 3). Keys carrying one k-mer are one test, copied to every "
-                         "carrier.".format(report["motif_family_size"], report["n_unique_motifs"])),
+        ("calibrated_q", "Motif level: Benjamini-Hochberg with divisor {} = the testable cells of unique motifs "
+                         "x 2 directions x 3 plotted pooled regions (nominal family {} = {} x 2 x 3; {} untestable "
+                         "cells carry untestable = TRUE and no q). Keys carrying one k-mer are one test, copied to "
+                         "every carrier.".format(report["motif_bh_divisor"], report["motif_family_size"],
+                                                 report["n_unique_motifs"],
+                                                 report["motif_family_size"] - report["motif_bh_divisor"])),
+        ("untestable / rbp_untestable", "TRUE when the calibrated p is NA because no window of the pooled region "
+                                        "has usable variance (for example no motif hit in any event). Such a cell "
+                                        "is not counted in the BH divisor."),
         ("unique_motif_id", "The k-mer of the motif key. {} keys carry {} unique k-mers; shared k-mers, "
                             "archives verified bit-identical: {}.".format(
                                 report["n_motif_keys"], report["n_unique_motifs"], shared or "none")),
@@ -566,12 +586,15 @@ def readme_rows(report, alias_table, rowunit_root):
                                             "motif's permutation distribution (same draws); the minimum over "
                                             "motifs is calibrated against its permutation distribution. Motifs "
                                             "weigh equally whatever the spread of their null. With one motif it "
-                                            "equals the motif p. BH over RBPs x 2 x 3 = {}.".format(
-                                                report["rbp_family_size"])),
+                                            "equals the motif p. BH divisor {} = the testable cells of RBPs x 2 "
+                                            "x 3 (nominal {}).".format(report["rbp_bh_divisor"]["minp"],
+                                                                       report["rbp_family_size"])),
         ("rbp_*_maxz / rbp_*_meanz", "SENSITIVITY: max and mean over the RBP's motifs of the same per-motif z, "
-                                     "each calibrated against its own permutation distribution; BH over {} "
-                                     "each. Max-z penalises an RBP whose second motif has a heavier-tailed "
-                                     "null; min-P does not.".format(report["rbp_family_size"])),
+                                     "each calibrated against its own permutation distribution; BH divisor "
+                                     "{} (max-z) and {} (mean-z) of nominal {}. Max-z penalises an RBP whose "
+                                     "second motif has a heavier-tailed null; min-P does not.".format(
+                                         report["rbp_bh_divisor"]["maxz"], report["rbp_bh_divisor"]["meanz"],
+                                         report["rbp_family_size"])),
         ("RBP grouping", "Alias table {}; table names without an alias entry stay their own RBP.".format(
             alias_table)),
         ("*_rowunit", ("SENSITIVITY: the row-unit result (each rMATS row an independent permutation unit), read "
@@ -665,11 +688,15 @@ def readout_lines(arm, condensed, report):
                   "calibrated p takes few distinct values. Read as landscape; do not rank RBPs from it.", ""]
     lines += [
         NULL_DESCRIPTION, "",
-        "- **Motif level**: permutation p per unique motif and pooled region; BH over {} tests ({} unique "
-        "motifs x 2 directions x 3 pooled regions).".format(report["motif_family_size"], report["n_unique_motifs"]),
+        "- **Motif level**: permutation p per unique motif and pooled region; BH divisor {} testable cells of "
+        "the {} = {} unique motifs x 2 directions x 3 pooled regions ({} untestable).".format(
+            report["motif_bh_divisor"], report["motif_family_size"], report["n_unique_motifs"],
+            report["motif_untestable_cells"]),
         "- **RBP level, min-P (primary)**: smallest per-motif permutation p per RBP, the minimum taken inside "
-        "every permutation; BH over {} tests.".format(report["rbp_family_size"]),
-        "- **RBP level, max-z and mean-z (sensitivity)**: BH over {} tests each.".format(report["rbp_family_size"]),
+        "every permutation; BH divisor {} of {} ({} untestable).".format(
+            report["rbp_bh_divisor"]["minp"], report["rbp_family_size"], report["rbp_untestable_cells"]["minp"]),
+        "- **RBP level, max-z and mean-z (sensitivity)**: BH divisor {} and {} of {}.".format(
+            report["rbp_bh_divisor"]["maxz"], report["rbp_bh_divisor"]["meanz"], report["rbp_family_size"]),
         "- **Row unit (sensitivity, not reportable)**: {}.".format(
             "*_rowunit columns from " + report["rowunit_source"] if report["rowunit_source"] else "not computed"),
         "",

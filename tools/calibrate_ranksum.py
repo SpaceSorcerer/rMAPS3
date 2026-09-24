@@ -289,13 +289,18 @@ def calibrate(model: MotifModel, masks: dict, selection: np.ndarray, chunk: int)
     } for name in masks}
 
 
-def bh_adjust(values):
+def bh_adjust(values, return_divisor=False):
+    """BH q over the finite entries; non-finite (untestable) entries stay NaN and are not counted.
+
+    With return_divisor=True returns (q, m): m is the divisor BH actually used, the number of finite
+    p-values, which is smaller than the nominal family whenever a cell is untestable.
+    """
     values = np.asarray(values, dtype=float)
     out = np.full(values.shape, np.nan)
     finite = np.isfinite(values)
     if np.any(finite):
         out[finite] = false_discovery_control(values[finite], method="bh")
-    return out
+    return (out, int(finite.sum())) if return_divisor else out
 
 
 def write_tsv(path: Path, rows, columns):

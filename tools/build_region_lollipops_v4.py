@@ -23,8 +23,8 @@ main() accepts argv and survives a single-layer run.
 Layer 1 / MAIN  : released_ranksum_rawP  - authors' released rMAPS3 (b9a9dce) run with
                   --stat-method mannwhitney; raw regional-minimum p exactly as the tool reports it.
 Layer 2 / SUPP  : calibrated_ranksum     - the same statistic with a Westfall-Young
-                  label-permutation p over target-exon clusters; BH q over the motif family (726)
-                  or the RBP family (600).
+                  label-permutation p over target-exon clusters; BH q over the testable cells of the motif family
+                  or the RBP family (the divisor actually used is printed).
 
 The look is inherited verbatim from v3.1 (build_rmaps_region_lollipops.py); only the layer
 inputs change. v3.1 is never modified.
@@ -310,6 +310,42 @@ def released_entries(arm, root, mappings, commit=RELEASED_COMMIT, stat_method=ST
     return entries, sources, n_motifs
 
 
+def bh_divisors(motif_rows, condensed_rows, rbp_column, report, arm):
+    """The BH divisors the calibration actually used: testable (finite-p) cells of each plotted family.
+
+    Derived from the tables so older summaries work; when refinement_report.json records the divisors
+    (calibration v2.1 of 2026-09-24 onward) they must agree."""
+    motif_cells = {(r['unique_motif_id'], r['direction'], r['pooled_region']): _num(r['calibrated_p_pooled'])
+                   for r in motif_rows}
+    motif = sum(v is not None for v in motif_cells.values())
+    plotted = [r for r in condensed_rows if r['plot'].strip().upper() == 'TRUE']
+    rbp = sum(_num(r['rbp_calibrated_p_' + rbp_column]) is not None for r in plotted)
+    if len(motif_cells) != report['motif_family_size'] or len(plotted) != report['rbp_family_size']:
+        raise ValueError(f'{arm}: plotted cells disagree with the recorded BH families')
+    recorded_rbp = report.get('rbp_bh_divisor', {}).get(rbp_column)
+    if ('motif_bh_divisor' in report and report['motif_bh_divisor'] != motif) or (
+            recorded_rbp is not None and recorded_rbp != rbp):
+        raise ValueError(f'{arm}: BH divisors in refinement_report.json disagree with the tables')
+    return {'motif_bh_divisor_used': motif, 'rbp_bh_divisor_used': rbp,
+            'motif_untestable_used': report['motif_family_size'] - motif,
+            'rbp_untestable_used': report['rbp_family_size'] - rbp}
+
+
+def family_text(refinement, by_rbp, short=False):
+    """'BH q over <divisor actually used> ...' for legends, subtitles, sidecars and the index."""
+    if by_rbp:
+        n, u = refinement['rbp_bh_divisor_used'], refinement['rbp_untestable_used']
+        detail = f"{refinement['n_rbps']} RBPs × 2 directions × 3 regions"
+        noun = 'RBP-level tests'
+    else:
+        n, u = refinement['motif_bh_divisor_used'], refinement['motif_untestable_used']
+        detail = f"{refinement['n_unique_motifs']} unique motifs × 2 directions × 3 regions"
+        noun = 'motif-level tests'
+    if short:
+        return f'{n} {noun}' + (f' ({u} untestable)' if u else '')
+    return f'{n} {noun} ({detail}' + (f'; {u} untestable cells excluded' if u else '') + ')'
+
+
 def calibrated_entries(arm, root, mappings):
     """Westfall-Young calibrated rank-sum summary -> pooled-region entries (one per motif x panel)."""
     base = Path(root) / arm
@@ -330,8 +366,12 @@ def calibrated_entries(arm, root, mappings):
     grouped = defaultdict(list)
     for r in rows:
         grouped[(r['direction_label'], r['pooled_region'], r['motif_key'])].append(r)
-    entries = []
+    report = dict(report, **bh_divisors(rows, read_tsv(base / 'condensed_per_rbp.tsv'), rbp_column, report, arm))
+    entries, untestable = [], []
     for (direction, pooled, key), group in grouped.items():
+        if _num(group[0]['calibrated_p_pooled']) is None:
+            untestable.append((direction, pooled, key))
+            continue
         if pooled not in REGIONS or direction not in DIRECTIONS:
             raise ValueError(f'Unexpected calibrated panel {direction} x {pooled}')
         if len({r['calibrated_q'] for r in group}) != 1 or len({r['calibrated_p_pooled'] for r in group}) != 1:
@@ -349,9 +389,11 @@ def calibrated_entries(arm, root, mappings):
                         '_calib_stage': rep['calib_stage_pooled'],
                         '_p_rowunit': float(rep['calibrated_p_pooled_rowunit']),
                         '_q_rowunit': float(rep['calibrated_q_rowunit'])})
-    n_motifs = len({e['motif_key'] for e in entries})
-    if len(entries) != n_motifs * 6 or n_motifs != report['n_motif_keys']:
-        raise ValueError(f'Calibrated entry count {len(entries)} != {report["n_motif_keys"]} motif keys x 6 panels')
+    n_motifs = len({e['motif_key'] for e in entries} | {k for _, _, k in untestable})
+    if len(entries) + len(untestable) != n_motifs * 6 or n_motifs != report['n_motif_keys']:
+        raise ValueError(f'Calibrated entry count {len(entries)} + {len(untestable)} untestable != '
+                         f'{report["n_motif_keys"]} motif keys x 6 panels')
+    report['untestable_entries'] = sorted(untestable)
     if report['n_unique_motifs'] * 6 != report['motif_family_size']:
         raise ValueError(f'{arm}: motif family {report["motif_family_size"]} != 6 x {report["n_unique_motifs"]} unique')
     if report['n_rbps'] * 6 != report['rbp_family_size']:
@@ -405,10 +447,15 @@ def load_rbp_level(table, arm):
     rows = [r for r in read_tsv(table) if r['plot'].strip().upper() == 'TRUE']
     if not rows:
         raise ValueError(f'No plotted RBP-level rows in {table}')
+
+    def untestable(r):
+        return r.get('rbp_untestable', '').strip().upper() == 'TRUE'
+
     chosen = None
     for name, pcol, qcol in RBP_LEVEL_COLUMNS:
-        if pcol in rows[0] and qcol in rows[0] and all(_num(r[pcol]) is not None and _num(r[qcol]) is not None
-                                                     for r in rows):
+        if pcol in rows[0] and qcol in rows[0] and all(
+                (_num(r[pcol]) is not None and _num(r[qcol]) is not None) or
+                (name == 'minp' and untestable(r) and _num(r[pcol]) is None) for r in rows):
             chosen = (name, pcol, qcol)
             break
     if chosen is None:
@@ -419,7 +466,7 @@ def load_rbp_level(table, arm):
         k = (r['RBP'], r['direction_label'], r['pooled_region'])
         if k in out:
             raise ValueError(f'Duplicate RBP-level row {k} in {table}')
-        out[k] = {'_rbp_p': float(r[pcol]), '_rbp_q': float(r[qcol]),
+        out[k] = {'_rbp_p': _num(r[pcol]) or math.nan, '_rbp_q': _num(r[qcol]) or math.nan,
                   '_rbp_q_minp': _num(r.get('rbp_calibrated_q_minp')),
                   '_rbp_q_maxz': _num(r.get('rbp_calibrated_q_maxz')),
                   '_rbp_q_meanz': _num(r.get('rbp_calibrated_q_meanz')),
@@ -659,13 +706,16 @@ def load_power_label(arm, root, counts, underpowered=()):
             'adequate': label.strip().lower() == 'adequate', 'source': table}
 
 
-def cross_check_layers(released, calibrated, arm):
-    """The calibrated layer recalibrates the released statistic: native pooled p must be identical."""
+def cross_check_layers(released, calibrated, arm, untestable=()):
+    """The calibrated layer recalibrates the released statistic: native pooled p must be identical.
+
+    Untestable calibrated cells (no usable window, calibrated p NA) are not drawn on the supplement;
+    they must be exactly the released cells missing from it."""
     rel = {(e['direction_label'], e['pooled_region'], e['motif_key']): e['_native_p'] for e in released}
     cal = {(e['direction_label'], e['pooled_region'], e['motif_key']): e['_native_p'] for e in calibrated}
-    if set(rel) != set(cal):
+    if set(rel) != set(cal) | set(map(tuple, untestable)) or set(cal) & set(map(tuple, untestable)):
         raise ValueError(f'Released and calibrated rank-sum motif universes differ for {arm}')
-    bad = [k for k in rel if not math.isclose(rel[k], cal[k], rel_tol=1e-9)]
+    bad = [k for k in cal if not math.isclose(rel[k], cal[k], rel_tol=1e-9)]
     if bad:
         raise ValueError(f'Native rank-sum p differs between released table and calibration summary: {arm} {bad[:3]}')
     return len(rel)
@@ -1041,10 +1091,7 @@ def subtitle(layer, refinement, kind='byMotif'):
     stage1 = f"{refinement['stage1_permutations']:,}"
     stage2 = f"{refinement['stage2_permutations']:,}"
     floor = f"1/{refinement['stage2_permutations'] + 1:,}"
-    family = (f"BH q over {refinement['rbp_family_size']} RBP-level tests ({refinement['n_rbps']} RBPs × 2 "
-              "directions × 3 regions)" if kind == 'byRBP' else
-              f"BH q over {refinement['motif_family_size']} tests ({refinement['n_unique_motifs']} unique motifs × 2 "
-              "directions × 3 regions)")
+    family = 'BH q over ' + family_text(refinement, kind == 'byRBP')
     return (f"Same statistic, Westfall–Young permutation-calibrated p: changed/background labels permuted over "
             f"target-exon clusters, min-P over the windows of a region"
             + (" and over the RBP's motifs" if kind == 'byRBP' else '') + ".\n"
@@ -1073,8 +1120,7 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                  'stems above the cap are truncated and labelled with their value']
     else:
         by_rbp = kind == 'byRBP'
-        family = (f'{refinement["rbp_family_size"]} RBP-level tests' if by_rbp else
-                  f'{refinement["motif_family_size"]} motif-level regional tests')
+        family = family_text(refinement, by_rbp, short=True)
         maxz = refinement['rbp_level_column'] == 'maxz'
         colour = ('Dot colour = calibrated BH q (motif level)' if not by_rbp else
                   'Dot colour = RBP-level calibrated BH q — RBP-level q: max-z (min-P pending)' if maxz else
@@ -1424,9 +1470,19 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                 raise ValueError(f'Duplicate HGNC group {arm} {l} {key}')
             rank_maps[l] = dict(zip([r['_label'] for r in rows], rankdata([r['_p'] for r in rows], method='average')))
             top_sets[l] = {r['_label'] for r in rows[:10]}
-        names = set(selected[v4_layers[0]])
-        if any(set(selected[l]) != names for l in v4_layers):
-            raise ValueError(f'RBP universes differ between v4 layers for {arm} {key}')
+        names = set().union(*(set(selected[l]) for l in v4_layers))
+        untestable = {tuple(u) for u in (refinement or {}).get('untestable_entries', ())}
+        for l in v4_layers:
+            missing = names - set(selected[l])
+            # Only the supplement may lack an RBP, and only one whose every cell there is untestable.
+            if missing and (l != 'calibrated_ranksum' or 'released_ranksum_rawP' not in selected or any(
+                    (direction, region, selected['released_ranksum_rawP'][n]['motif_key']) not in untestable
+                    for n in missing)):
+                raise ValueError(f'RBP universes differ between v4 layers for {arm} {key}')
+            if missing:
+                universe_notes.append({'arm': arm, 'direction': direction, 'pooled_region': region,
+                                       'v4_only': 'untestable in the supplement: ' + ';'.join(sorted(missing)),
+                                       'n_shared': len(names) - len(missing)})
         prior_names = {n for n in names if (direction, region, n) in prior}
         if prior_layers and prior_names != names:
             universe_notes.append({'arm': arm, 'direction': direction, 'pooled_region': region,
@@ -1438,7 +1494,14 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
         for name in sorted(names):
             record = dict(arm=arm, direction=direction, pooled_region=region, RBP=name)
             for l in v4_layers:
-                r = selected[l][name]
+                r = selected[l].get(name)
+                if r is None:  # untestable in the supplement: no calibrated value exists
+                    record.update({f: None for f in fields if f.startswith(l) or f in (
+                        'calibrated_ranksum_q', 'rbp_level_column', 'calibrated_motif_p_cluster',
+                        'calibrated_motif_q_cluster', 'calibrated_p_rowunit', 'calibrated_q_rowunit',
+                        'rbp_calibrated_q_minp', 'rbp_calibrated_q_maxz', 'rbp_calibrated_q_meanz',
+                        'calib_perms_used', 'calib_stage')})
+                    continue
                 record.update({f'{l}_p': float(r['_p']), f'{l}_rank': float(rank_maps[l][name]),
                                f'{l}_motif': r['motif_key'], f'{l}_top10': int(name in top_sets[l])})
                 if l == 'calibrated_ranksum':
@@ -1516,14 +1579,15 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                                 'means the background count was 0, so the ratio is undefined and the figure draws an '
                                 'open dot. No value here is recomputed.'),
         ('Calibrated columns (v4.2)', 'calibrated_ranksum_p / _q / _rank are the plotted by-RBP statistic: the '
-                                      'RBP-level calibrated p and BH q over the RBP family (100 RBPs x 2 directions x '
-                                      '3 regions = 600), from the column pair named in rbp_level_column (minp = min-P '
+                                      'RBP-level calibrated p and BH q over '
+                                      + (family_text(refinement, True) if refinement else 'the RBP family') +
+                                      ', from the column pair named in rbp_level_column (minp = min-P '
                                       'over the RBP\'s motifs inside the permutation, the primary; maxz = max-z, used '
                                       'only while the min-P pair is absent). calibrated_motif_p_cluster / _q_cluster: '
                                       'the selected motif\'s motif-level p and BH q, target-exon cluster permutation, '
-                                      'family 726 (121 unique motifs x 2 x 3). calibrated_p_rowunit / _q_rowunit: the '
-                                      'same motif under the v1 rMATS-row permutation unit, family 756, kept for '
-                                      'comparison only. rbp_calibrated_q_minp / _maxz / _meanz: the three RBP-level q '
+                                      'BH over ' + (family_text(refinement, False) if refinement else 'the motif family')
+                                      + '. calibrated_p_rowunit / _q_rowunit: the same motif under the v1 rMATS-row '
+                                      'permutation unit, kept for comparison only. rbp_calibrated_q_minp / _maxz / _meanz: the three RBP-level q '
                                       'columns side by side (NA when that column is not in the calibration summary). '
                                       'Source: <calibrated-root>/<ARM>/{per_motif_regions,'
                                       'condensed_per_rbp}.tsv. Nothing is recomputed.'),
@@ -1554,8 +1618,8 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                               f'(B = {refinement["stage1_permutations"]}, refined to '
                               f'{refinement["stage2_permutations"]} where stage-1 p <= {refinement["refine_threshold"]}'
                               f', seed {refinement["seed"]}; unit = target-exon cluster) with BH q over '
-                              f'{refinement["motif_family_size"]} motif-level tests and, at RBP level, over '
-                              f'{refinement["rbp_family_size"]} RBP-level tests.'
+                              f'{family_text(refinement, False)} and, at RBP level, over '
+                              f'{family_text(refinement, True)}.'
                               if refinement else 'Not built for this arm; the calibration summary was absent.'),
         ('Why the rank-sum p is so small', 'The ranked unit is one observation per eligible exon per window. With more '
                                            'than 99% of exons carrying no motif hit, the tie correction collapses the '
@@ -1628,11 +1692,12 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
              '<p class="supp"><b>SUPPLEMENT — permutation-calibrated rank-sum (calibration v2).</b> The same '
              'statistic with its p recalibrated by Westfall\u2013Young label permutation over target-exon clusters '
              '(min-P over the windows of a region and, for the by-RBP figure, over the RBP\u2019s motifs, inside the '
-             'permutation; B = 2,000 refined to 100,000). By-motif figures: stem = motif-level calibrated p, colour = '
-             'BH q over 726 motif-level tests. By-RBP figures: stem, rank and colour = the RBP-level calibrated p and '
-             'BH q over 600 RBP-level tests. These are the p and q to report. Null = exchangeability of changed '
-             'target exons within the tested universe. Dot size is the tool\u2019s motif-score ratio, as on the main '
-             'layer.</p>',
+             'permutation; each arm\u2019s section gives its B). By-motif figures: stem = motif-level calibrated p, '
+             'colour = its BH q. By-RBP figures: stem, rank and colour = the RBP-level calibrated p and BH q. Each '
+             'arm\u2019s section gives the BH divisor actually used, the testable cells of the family. Every '
+             'calibrated p is a valid permutation p, and BH over them controls the FDR under PRDS-type dependence. '
+             'These are the p and q to report. Null = exchangeability of changed target exons within the tested '
+             'universe. Dot size is the tool\u2019s motif-score ratio, as on the main layer.</p>',
              '<p>Included stems rise, skipped stems hang down, and the six panels of one figure share a y-scale. '
              'Best motifs are chosen after HGNC grouping; the twelve synthetic ESRP-like hexamers form one group. '
              'The <code>_noSpliceosome_noBroad</code> variants drop the lab core-spliceosome and broad-binder lists '
@@ -1670,7 +1735,8 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
                      f'{c["n_bg"]:,}' + (f'; over {te["up"]:,} / {te["dn"]:,} / {te["bg"]:,} target exons' if te else '')
                      + '. ' + html.escape(' '.join(rec['gate_lines'])) + '</p>'
                      + (f'<p>By-RBP supplement colour and stem: RBP-level column <b>{rec["rbp_level_column"]}</b>'
-                        + (' (min-P pending; max-z fallback)' if rec['rbp_level_column'] == 'maxz' else '') + '.</p>'
+                        + (' (min-P pending; max-z fallback)' if rec['rbp_level_column'] == 'maxz' else '') + '. '
+                        + html.escape(rec['supplement_text']) + '</p>'
                         if rec.get('rbp_level_column') else ''))
         power = rec['power']
         if power is not None and not power['adequate']:
@@ -1838,7 +1904,8 @@ def main(argv=None):
         if not layers:
             print(f'SKIP {arm}: no layer input present', flush=True)
             continue
-        crosschecked = (cross_check_layers(layers['released_ranksum_rawP'], layers['calibrated_ranksum'], arm)
+        crosschecked = (cross_check_layers(layers['released_ranksum_rawP'], layers['calibrated_ranksum'], arm,
+                                           refinement.get('untestable_entries', ()))
                         if len(layers) == 2 else None)
         arm_exclusion, dropped = exclusion_audit(arm, layers[next(iter(layers))], lists)
         exclusion_rows.extend(arm_exclusion)
@@ -1975,8 +2042,7 @@ def main(argv=None):
                      f'{refinement["rbp_directions_promoted"]} RBP-directions promoted); permutation floor '
                      f'1/{refinement["stage2_permutations"] + 1}.',
                      f'- byMotif supplement: stem and rank = motif-level cluster calibrated p; colour = calibrated_q, BH '
-                     f'over {refinement["motif_family_size"]} tests ({refinement["n_unique_motifs"]} unique motifs x 2 x '
-                     '3; keys sharing a k-mer carry the same result).',
+                     f'over {family_text(refinement, False)}; keys sharing a k-mer carry the same result.',
                      f'- byRBP supplement: best motif per HGNC group chosen by motif-level calibrated p as in v4.1 (it '
                      'sets the dot size and tick); stem, rank and colour = the RBP-level calibrated p and q from '
                      f'condensed_per_rbp.tsv column pair "{refinement["rbp_level_column"]}" '
@@ -1984,7 +2050,7 @@ def main(argv=None):
                         if refinement['rbp_level_column'] == 'minp' else
                         '(max-z FALLBACK: the min-P pair was absent or incomplete at build time; the legend says '
                         '"RBP-level q: max-z (min-P pending)")')
-                     + f', BH over {refinement["rbp_family_size"]} tests ({refinement["n_rbps"]} RBPs x 2 x 3). The '
+                     + f', BH over {family_text(refinement, True)}. The '
                      'ESRP-like group holds 12 single-motif calibration RBPs; its representative carries its own '
                      'RBP-level value, which equals its motif p, so the group is not jointly calibrated.',
                      f'- Counted units: events (rMATS SE rows) {counts["n_up"]}/{counts["n_dn"]}/{counts["n_bg"]} over '
@@ -2062,6 +2128,11 @@ def main(argv=None):
         for layer, s in sorted(scales.items()):
             scale_rows.append({'arm': arm, 'layer': layer, **s})
         records.append({'arm': arm, 'target_exons': target_exons, 'gate_lines': gate_lines(texts, arm, counts),
+                        'supplement_text': (f'B = {refinement["stage1_permutations"]:,} permutations, refined to '
+                                            f'{refinement["stage2_permutations"]:,} where stage-1 p ≤ '
+                                            f'{refinement["refine_threshold"]}. BH divisors actually used: by-motif '
+                                            f'{family_text(refinement, False)}; by-RBP '
+                                            f'{family_text(refinement, True)}.') if refinement else '',
                         'rbp_level_column': refinement['rbp_level_column'] if refinement else None,
                         'length_status': length_status, 'sensitivity': sensitivity or 'none', 'counts': counts, 'layers': sorted(layers),
                         'rank_summary': summaries,
