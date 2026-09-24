@@ -55,6 +55,7 @@ STAT_CAVEATS = {
                     "continuity correction. With almost every eligible exon carrying no hit it is "
                     "severely anti-conservative: report the RBP ORDER, not the p as a p."),
 }
+RELEASED_ENGINE_COMMIT = "b9a9dce"
 GATE_RULES = ("A", "B", "Beffect")
 RULE_B_SUFFIXES = ("B", "Beffect")
 BLAS_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -92,6 +93,14 @@ def versions() -> dict:
         except importlib.metadata.PackageNotFoundError:
             out[package] = "not installed"
     return out
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def git_revision(repo: Path) -> str:
@@ -243,16 +252,60 @@ def engine_root_of(args) -> Path:
     return ROOT
 
 
-def run_engine(args, paths, out: Path, log: Logger, env: dict):
-    engine_root = engine_root_of(args)
-    if not (engine_root / "cli.py").is_file():
-        raise ValueError(f"No cli.py under the {args.engine} engine root: {engine_root}")
+def check_engine_checkout(args):
+    """The released engine must be a clean git checkout at the expected commit; returns its full SHA.
+
+    Refuses (ValueError) a non-git directory, a HEAD other than --engine-commit, and any tracked or
+    untracked change, so a run can never claim b9a9dce while executing modified engine code."""
+    if args.engine != "released":
+        return None
+    root = Path(args.engine_root)
+
+    def git(*command):
+        proc = subprocess.run(["git", "-C", str(root), *command], capture_output=True, text=True)
+        return proc.returncode, proc.stdout.strip()
+
+    rc, head = git("rev-parse", "HEAD")
+    if rc != 0:
+        raise ValueError(f"--engine-root {root} is not a git checkout, so the released engine cannot be pinned")
+    rc, expected = git("rev-parse", "--verify", "--quiet", args.engine_commit + "^{commit}")
+    if rc != 0 or head != expected:
+        raise ValueError(f"released engine at {root} is at {head[:12]}, not at the expected commit "
+                         f"{args.engine_commit} (--engine-commit)")
+    rc, status = git("status", "--porcelain")
+    if rc != 0 or status:
+        raise ValueError(f"released engine checkout {root} has uncommitted changes or untracked files; "
+                         "refusing to run a modified engine:\n" + status[:500])
+    return head
+
+
+def motif_tables(args, engine_root: Path):
     known = Path(args.known_motifs) if args.known_motifs else engine_root / "data" / "knownMotifs.human.mouse.txt"
     if args.additional_motifs and args.additional_motifs.upper() == "NA":
         additional = None
     else:
         additional = (Path(args.additional_motifs) if args.additional_motifs
                       else engine_root / "data" / "ESRP.like.motif.txt")
+    return known, additional
+
+
+def reference_hashes(args, fasta: Path, known: Path, additional) -> list:
+    """(label, path, sha256) for every reference, list and gate input that shapes the result."""
+    items = [("genome_fasta", fasta), ("genome_fai", Path(str(fasta) + ".fai")),
+             ("known_motifs", known), ("additional_motifs", additional), ("alias_table", args.alias_table),
+             ("gtf", args.gtf), ("spliceosome_list", args.spliceosome_list),
+             ("broad_binders_list", args.broad_binders_list), ("gate_counts", args.gate_counts),
+             ("gate_record", args.gate_record), ("filter_spec", args.filter), ("rmats_se", args.rmats_se),
+             ("up", args.up), ("dn", args.dn), ("bg", args.bg)]
+    return [(label, str(Path(path).resolve()), sha256(Path(path)))
+            for label, path in items if path and Path(path).is_file()]
+
+
+def run_engine(args, paths, out: Path, log: Logger, env: dict):
+    engine_root = engine_root_of(args)
+    if not (engine_root / "cli.py").is_file():
+        raise ValueError(f"No cli.py under the {args.engine} engine root: {engine_root}")
+    known, additional = motif_tables(args, engine_root)
     for path in filter(None, (known, additional)):
         if not path.is_file():
             raise ValueError(f"Motif table absent: {path}")
@@ -989,6 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", choices=("released", "audited"), default="released")
     p.add_argument("--engine-root", default=None,
                    help=f"required for --engine released; audited default {ROOT}")
+    p.add_argument("--engine-commit", default=RELEASED_ENGINE_COMMIT,
+                   help="commit the released-engine checkout must be at, clean; default the authors' "
+                        "released engine")
     p.add_argument("--stat-method", choices=("fisher", "mannwhitney"), default="mannwhitney")
     p.add_argument("--known-motifs", default=None)
     p.add_argument("--additional-motifs", default=None)
@@ -1131,6 +1187,7 @@ def main(argv=None) -> int:
     try:
         validate(args)
         require_site_paths(args)
+        engine_sha = check_engine_checkout(args)
     except ValueError as exc:
         parser.exit(2, f"ERROR: {exc}\n")
     out = Path(args.out).resolve()
@@ -1144,12 +1201,15 @@ def main(argv=None) -> int:
                 "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
                 "wrapper_md5": md5(Path(__file__).resolve()),
                 "effective_gate_rule": "A" if args.rmats_se else (args.gate_rule or arm_rule(args.arm)),
-                "fork_revision": git_revision(ROOT), "versions": versions(), "steps": []}
+                "fork_revision": git_revision(ROOT), "versions": versions(), "steps": [],
+                "engine_commit_verified": engine_sha}
     (out / "versions.txt").write_text(
         "\n".join(f"{k}\t{v}" for k, v in manifest["versions"].items())
         + f"\nfork_revision\t{manifest['fork_revision']}"
         + f"\nwrapper\t{Path(__file__).resolve()}"
         + f"\nwrapper_md5\t{manifest['wrapper_md5']}"
+        + f"\nengine\t{args.engine}"
+        + f"\nengine_commit_verified_clean\t{engine_sha or 'not applicable (audited engine = this checkout)'}"
         + f"\nseed\t{args.seed}"
         + f"\ngenerated\t{time.strftime('%Y-%m-%dT%H:%M:%S')}\n", encoding="utf-8")
     log("command: " + manifest["command"])
@@ -1161,6 +1221,12 @@ def main(argv=None) -> int:
     exit_code = 0
     try:
         paths, counts, fasta, fai = prepare_inputs(args, out, log, env)
+        hashes = reference_hashes(args, fasta, *motif_tables(args, engine_root_of(args)))
+        manifest["reference_sha256"] = {label: {"path": path, "sha256": digest} for label, path, digest in hashes}
+        with open(out / "versions.txt", "a", encoding="utf-8") as handle:
+            for label, path, digest in hashes:
+                handle.write(f"sha256\t{label}\t{digest}\t{path}\n")
+        log(f"recorded sha256 of {len(hashes)} reference, list and gate inputs in versions.txt")
         engine_out, wall, engine_root, known, additional = run_engine(args, paths, out, log, env)
         counts_root, conversion = convert_and_verify(args, engine_out, out, log, env)
         alias = load_alias(Path(args.alias_table))

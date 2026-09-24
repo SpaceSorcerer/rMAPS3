@@ -181,6 +181,13 @@ and `tools/rmaps3_lab_run.py` remain for reproduction.
 The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
 GENCODE GTF and the two exclusion lists explicitly. The skills hold the lab's values.
 
+### Environment
+
+- **Packages.** `requirements-lock.txt` pins every package the full lab chain imports, for Python 3.11. Install it into a fresh venv with `pip install -r requirements-lock.txt`. `requirements.txt` stays the upstream engine's minimal list.
+- **Lab interpreters.** No single lab interpreter satisfies the lock. `E:\rmaps_venv` runs the engine, wrapper, calibration, figures and tests but lacks pandas and PyYAML. The conda env `codex_py` has pandas for `tools/build_event_sets_lab_full.py` but lacks pyfaidx, PyX and pytest.
+- **Engine pin.** With `--engine released` the wrapper refuses to start unless `--engine-root` is a git checkout at `--engine-commit` (default `b9a9dce`) with no modified or untracked file. `versions.txt` records the verified SHA.
+- **Unversioned inputs.** The FASTA and its index, the GTF, the motif tables, the alias table, the exclusion lists, the gate record and the event sets are not shipped. The wrapper writes the sha256 of each one it was given to `versions.txt` and `run_manifest.json`.
+
 ### Reproduce one arm end to end
 
 A checkout of the released engine is needed. For example:
