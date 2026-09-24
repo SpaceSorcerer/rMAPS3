@@ -343,6 +343,7 @@ CONDENSED_COLUMNS = [
     "fg_proportion", "bg_proportion", "enrichment_ratio",
     "fg_mean_count", "bg_mean_count", "count_ratio",
     "n_motifs_total", "n_motifs_calib_q_lt_0.05", "n_motifs_native_q_lt_0.05",
+    "permutation_unit", "permutation_unit_status",
 ]
 POSITIONS_COLUMNS = [
     "arm", "motif_key", "RBP", "direction", "direction_label", "region", "pooled_region",
@@ -635,6 +636,8 @@ def run_arm(args, emit):
                         if any(math.isfinite(by_key[(m, direction, r)]["native_q"])
                                and by_key[(m, direction, r)]["native_q"] < 0.05
                                for r in io.POOL_TO_REGIONS[pool])),
+                    "permutation_unit": args.permutation_unit,
+                    "permutation_unit_status": args.unit_status,
                 }
                 for column in ("n_fg_exons", "n_bg_exons", "n_fg_carrying", "n_bg_carrying",
                                "fg_proportion", "bg_proportion", "enrichment_ratio",

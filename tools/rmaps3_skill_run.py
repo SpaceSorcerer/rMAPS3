@@ -58,6 +58,15 @@ STAT_CAVEATS = {
 RELEASED_ENGINE_COMMIT = "b9a9dce"
 GATE_RULES = ("A", "B", "Beffect")
 RULE_B_SUFFIXES = ("B", "Beffect")
+# Run status, most severe first; the first that applies wins. --allow-partial only turns INCOMPLETE into
+# complete_partial, so it never hides a failed positive control.
+STATUS_PRECEDENCE = (
+    ("failed", 1, "an exception stopped the run"),
+    ("INCOMPLETE", 4, "a required artefact is missing and --allow-partial was not given"),
+    ("complete_with_failed_positive_control", 3, "a positive control failed and was not --positive-control-advisory"),
+    ("complete_partial", 0, "a required artefact is missing and --allow-partial was given"),
+    ("complete", 0, "every required artefact exists and every positive control passed or is advisory"),
+)
 BLAS_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
 FILTER_ALIASES = {
@@ -856,6 +865,14 @@ def missing_deliverables(args, conversion, figures, engine_out=None) -> list:
     return missing
 
 
+def run_status(missing, allow_partial: bool, control_failed: bool, failed: bool = False):
+    """(status, exit code): the first row of STATUS_PRECEDENCE whose condition holds."""
+    holds = {"failed": failed, "INCOMPLETE": bool(missing) and not allow_partial,
+             "complete_with_failed_positive_control": control_failed,
+             "complete_partial": bool(missing) and allow_partial, "complete": True}
+    return next((status, code) for status, code, _ in STATUS_PRECEDENCE if holds[status])
+
+
 def write_index(args, out: Path, engine_out: Path, counts, controls, conversion, extras,
                 figures=None, missing=None) -> Path:
     import html as html_mod
@@ -1359,17 +1376,10 @@ def main(argv=None) -> int:
                         figures_skipped=(figures or {}).get("skipped"),
                         event_counts={k: counts[k]["n_events"] for k in counts}, missing=missing)
         checks = controls + figure_controls
-        if checks and not all(row["pass"] for row in checks) and not args.positive_control_advisory:
-            manifest["status"] = "complete_with_failed_positive_control"
-            exit_code = 3
-        if missing:
-            for item in missing:
-                log("MISSING " + item)
-            if args.allow_partial:
-                manifest["status"] = "complete_partial"
-            else:
-                manifest["status"] = "INCOMPLETE"
-                exit_code = 4
+        control_failed = bool(checks) and not all(row["pass"] for row in checks) and not args.positive_control_advisory
+        for item in missing:
+            log("MISSING " + item)
+        manifest["status"], exit_code = run_status(missing, args.allow_partial, control_failed)
     except Exception as exc:  # recorded, then re-raised through the exit code
         manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         log(f"FAILED {type(exc).__name__}: {exc}")
@@ -1379,13 +1389,14 @@ def main(argv=None) -> int:
         manifest["wall_seconds"] = time.perf_counter() - started
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n",
                                                encoding="utf-8")
+        log(f"exit={exit_code} wall_s={manifest['wall_seconds']:.1f}")
+        log.close()
+        # Hashed last: command.log is closed with its exit line, so md5.txt matches every file as left.
         with open(out / "md5.txt", "w", encoding="utf-8") as handle:
             handle.write("md5\tbytes\tpath\n")
             for path in sorted(out.rglob("*")):
                 if path.is_file() and path.name != "md5.txt":
                     handle.write(f"{md5(path)}\t{path.stat().st_size}\t{path}\n")
-        log(f"exit={exit_code} wall_s={manifest['wall_seconds']:.1f}")
-        log.close()
     return exit_code
 
 

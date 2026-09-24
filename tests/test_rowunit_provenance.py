@@ -82,3 +82,18 @@ def test_missing_or_different_source_md5_is_refused(tmp_path):
     (base / "input_md5s.tsv").unlink()
     with pytest.raises(ValueError, match="provenance incomplete"):
         run(args)
+
+
+def test_a_non_row_unit_in_the_condensed_table_is_refused(tmp_path):
+    args, base = arm_with_rowunit(tmp_path)
+
+    def mutate(lines):
+        header = lines[0].split("\t")
+        i = header.index("permutation_unit")
+        fields = lines[1].split("\t")
+        assert fields[i] == "row"
+        fields[i] = "target-exon cluster"
+        return [lines[0], "\t".join(fields)] + lines[2:]
+    rewrite(base / "condensed_per_rbp.tsv", mutate)
+    with pytest.raises(ValueError, match=r"condensed_per_rbp\.tsv .* must record permutation_unit 'row'"):
+        run(args)

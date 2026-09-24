@@ -144,10 +144,11 @@ def load_rowunit(args, motifs, rbps, counts_dir=None):
                          "pooled region) keys: {} missing, {} extra, {} duplicate rows".format(
                              base, len(rbp_axis - set(a_cond)), len(set(a_cond) - rbp_axis),
                              len(cond_rows) - len(a_cond)))
-    units = {r.get("permutation_unit") for r in motif_rows}
-    if units != {"row"}:
-        raise ValueError("row-unit tables in {} must record permutation_unit 'row' on every row; found {}".format(
-            base, sorted(str(u) for u in units)))
+    for name, rows in (("per_motif_regions.tsv", motif_rows), ("condensed_per_rbp.tsv", cond_rows)):
+        units = {r.get("permutation_unit") for r in rows}
+        if units != {"row"}:
+            raise ValueError("row-unit {} in {} must record permutation_unit 'row' on every row; found {}".format(
+                name, base, sorted(str(u) for u in units)))
     report_unit = json.loads((base / "refinement_report.json").read_text(encoding="utf-8")).get("permutation_unit")
     if report_unit != "row":
         raise ValueError("row-unit refinement_report.json in {} records permutation_unit {!r}, not 'row'".format(
