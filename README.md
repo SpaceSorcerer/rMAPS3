@@ -157,7 +157,7 @@ GRCh38 (hg38) / GENCODE v49 unless the inputs say otherwise, and SE events only.
 | Supplement | The same statistic with a Westfall–Young label-permutation p over target-exon clusters (two stages, seed 149), BH q over unique k-mers, and RBP-level min-P over each RBP's motifs | the p and q to report. Every calibrated p is a valid permutation p: stage-1 B = 2,000 (resolution 1/2,001), or stage-2 B = 100,000 (resolution 1/100,001) where promoted; `calib_perms_used` gives each p's B. BH over them controls the FDR under PRDS-type dependence, and mixed resolutions do not break that ([LESSONS.md](LESSONS.md), section 2) | `tools/calibrate_ranksum_v2.py` (calibration v2.1) |
 | Sensitivities | Row-unit calibration (`*_rowunit` columns), row vs target-exon unit, length-matched background, method comparison, count-aware tests | labelled comparisons, never the p | `calibrate_ranksum.py`, `unit_sensitivity.py`, `length_matched.py`, `compare_stat_methods.py`, `count_aware_stats.py` |
 | Stability | Foreground-bootstrap rank stability on an audited Fisher run | how many top RBPs are reproducible | `tools/rank_stability.py` |
-| Figures | Region lollipops, version 4.3.2: both layers, by-RBP and by-motif, with and without core-spliceosome and broad binders | — | `tools/build_region_lollipops_v4.py` |
+| Figures | Region lollipops, version 4.3.3: both layers, by-RBP and by-motif, with and without core-spliceosome and broad binders | — | `tools/build_region_lollipops_v4.py` |
 
 Rules that follow from the stack:
 
@@ -176,7 +176,7 @@ and `tools/rmaps3_lab_run.py` remain for reproduction.
 [`tools/rmaps3_skill_run.py`](tools/rmaps3_skill_run.py):
 
 - **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`. A run that lacks the verified archives, or the figures when `--no-figures` was not given, exits 4 with status `INCOMPLETE` in `run_manifest.json`; `--allow-partial` records it as `complete_partial` and exits 0.
-- **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.2 figures of both layers and the rank workbook.
+- **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.3 figures of both layers and the rank workbook.
 
 The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
 GENCODE GTF and the two exclusion lists explicitly. The skills hold the lab's values.

@@ -24,8 +24,8 @@ def text_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_version_is_4_3_2():
-    assert lol.FIG_VERSION == "4.3.2"
+def test_version_is_4_3_3():
+    assert lol.FIG_VERSION == "4.3.3"
 
 
 def test_text_precedence_is_command_line_then_record_then_default(tmp_path):

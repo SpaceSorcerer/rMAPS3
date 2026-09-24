@@ -13,6 +13,8 @@ L 0.40 (hue fixed, chroma rising, inside sRGB); the ramp position is piecewise l
 key ticks 0.05 / 0.01 / 0.001 / end at fixed shared positions, so adjacent key ticks differ by CIEDE2000 >= 15 and
 grey vs the 0.05 tint by >= 20 (asserted at build time; table colour_contrast_v432.tsv). The legend bars are drawn
 on the ramp position.
+v4.3.3 (2026-09-24): main-layer key and legend read "raw rank-sum p (released engine): ORDER ONLY — grey = p ≥ 0.05,
+not a significance claim"; engine commit and stat method come from the run; BH divisor actually used is printed.
 
 v4.2 (2026-09-22) over v4.1: the supplement reads calibration v2 (target-exon cluster permutation,
 tools/calibrate_ranksum_v2.py); by-motif colour = motif-level cluster q (family 726); by-RBP stem, rank and
@@ -63,7 +65,7 @@ SUBREGIONS = ['upstreamExon-3prime', 'upstreamExonIntron', 'upstreamIntron', 'ta
 POOLING = {'Upstream Intron': (1, 2), 'Exon Body': (3, 4), 'Downstream Intron': (5, 6)}
 RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
-FIG_VERSION = '4.3.2'
+FIG_VERSION = '4.3.3'
 SFX = '_v43'
 RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]

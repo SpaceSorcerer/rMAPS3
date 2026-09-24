@@ -15,7 +15,7 @@ Status key:
 
 | Tool | Purpose | Layer | Status |
 |---|---|---|---|
-| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.2 figures | wrapper | CANONICAL |
+| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.3 figures | wrapper | CANONICAL |
 | `build_event_sets.py` | Portable stdlib Rule-A pre-split builder, with eight-column coordinates and a gate ledger | inputs | CANONICAL (portable) |
 | `build_event_sets_lab_full.py` | The pandas lab builder behind the lab event sets: rule A, frozen rule B, and `--vast-conf effect-only` for ruleBeffect. Needs `requirements-lab-full.txt` | inputs | CANONICAL (lab) |
 | `countdist_to_npz.py` | Packs a released run's `temp/*.countDist.*.txt` into per-motif `*.counts.npz` archives | main layer | CANONICAL |
@@ -23,7 +23,7 @@ Status key:
 | `rmaps_countdist_io.py` | Shared readers and the released rank-sum kernel | library | CANONICAL |
 | `calibrate_ranksum_v2.py` | Calibration v2.1, which gives the p and q to report: target-exon cluster permutation, two stages, RBP-level min-P, and the unique-k-mer family | supplement | CANONICAL |
 | `rmaps_calib_v2_lib.py` | Cluster drawer, RBP min-P / max-z / mean-z and k-mer grouping for v2 | library | CANONICAL |
-| `build_region_lollipops_v4.py` | Region lollipops, figure version 4.3.2: both layers, by-RBP and by-motif, main and `_noSpliceosome_noBroad` | figures | CANONICAL |
+| `build_region_lollipops_v4.py` | Region lollipops, figure version 4.3.3: both layers, by-RBP and by-motif, main and `_noSpliceosome_noBroad` | figures | CANONICAL |
 | `rank_stability.py` | Foreground-bootstrap stability of the RBP order on an audited Fisher run (`positional/*.hits.npz`) | stability | CANONICAL |
 | `calibrate_ranksum.py` | v1 row-unit calibration. It writes the `*_rowunit` sensitivity columns, and v2 imports its `MotifModel` | supplement | SUPERSEDED by `calibrate_ranksum_v2.py`; SENSITIVITY only |
 | `unit_sensitivity.py` | Row versus target-exon unit comparison. A is the row unit, B deduplicates to one row per target exon, C keeps rows and permutes clusters | sensitivity | SENSITIVITY |

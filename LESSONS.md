@@ -112,7 +112,7 @@ and 09-22 addenda. Dated facts keep their dates.
   - The frozen dissertation sets are unaffected. Event selection never depended on this ratio. Their recorded `informative_agreement` was 1.0 in all three arms, so a rebuild would only raise the recorded `agreement` (0.961 MIAT_KD, 0.981 MIAT_OE, 0.980 QKI_KO in `E:\rmaps_work\logs\<ARM>\orientation.json`) to 1.0.
   - The frozen RBP-RELI source `build_reli_foregrounds_v2.py` still carries the old formula. RBP-RELI is a shared engine and was not changed here.
 
-## 4. Figures (version 4.3.2)
+## 4. Figures (version 4.3.3)
 
 - **Layers.** Two layers per arm (main, supplement). Two kinds: by-RBP, with one dot per RBP at its best motif, and by-motif, with the top 10 motifs per panel. Two variants: main and `_noSpliceosome_noBroad` (SRSF1 always kept). Built by `tools/build_region_lollipops_v4.py`.
 - **Encoding.**
