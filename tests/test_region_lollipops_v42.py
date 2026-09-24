@@ -50,8 +50,9 @@ def test_resolve_texts_accepts_a_namespace_without_text_flags():
 
 def test_gate_lines_fill_placeholders_and_cap_at_three_lines():
     texts = lol.resolve_texts(text_args(gate_text="n={n_up}/{n_dn}/{n_bg} rule {rule}\\nsecond {unknown}"))
-    assert lol.gate_lines(texts, "ARM_X", COUNTS) == ["n=20/18/200 rule X", "second {unknown}"]
-    default = lol.gate_lines(lol.resolve_texts(text_args()), "ARM_Beffect", COUNTS)
+    texts["rule"] = "B"                                          # the stated rule, never the arm-name suffix
+    assert lol.gate_lines(texts, "ARM_A", COUNTS) == ["n=20/18/200 rule B", "second {unknown}"]
+    default = lol.gate_lines(dict(lol.resolve_texts(text_args()), rule="Beffect"), "ARM_A", COUNTS)
     assert len(default) == 3 and default[-1] == lol.DEFAULT_BEFFECT_LINE
     with pytest.raises(ValueError, match="at most three lines"):
         lol.gate_lines(lol.resolve_texts(text_args(gate_text="a\\nb\\nc\\nd")), "ARM_A", COUNTS)
@@ -103,7 +104,7 @@ def test_single_layer_main_draws_the_released_layer_with_overridden_text(tmp_pat
 
 
 def test_sidecar_statements_follow_the_text_flags_and_default_to_the_dissertation():
-    default = lol.sidecar_statements(lol.resolve_texts(text_args()), "QKI_KO_B", COUNTS,
+    default = lol.sidecar_statements(dict(lol.resolve_texts(text_args()), rule="B"), "QKI_KO_B", COUNTS,
                                      "persample10_bm50_bgfdr0.5", "not_measured")
     assert default[0].startswith("- Gate persample10_bm50_bgfdr0.5, rule B: included 20")
     assert default[1] == lol.DEFAULT_SIDECAR_MD5 and default[2] == lol.DEFAULT_SIDECAR_LENGTH

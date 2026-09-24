@@ -22,7 +22,7 @@ def parse(*argv):
     return skill.build_parser().parse_args(list(argv))
 
 
-BASE = ("--mode", "quick", "--arm", "A1", "--out", "out", "--no-figures")
+BASE = ("--mode", "quick", "--arm", "A1", "--out", "out", "--no-figures", "--gate-rule", "A")
 
 
 # ------------------------------------------------------------------ argument logic
@@ -239,14 +239,15 @@ def test_positive_control_passes_only_at_rank_one(tmp_path):
 def test_readme_names_the_statistic_caveat_and_the_counted_unit(tmp_path):
     engine, _, _, motifs = synthetic_engine_run(tmp_path)
     args = parse(*BASE[:4], "--out", str(tmp_path), "--up", "u", "--dn", "d", "--bg", "b",
-                 "--genome-root", "genomes")
+                 "--genome-root", "genomes", "--gate-rule", "B")
     rows = skill.readme_rows(args, engine, ROOT, fake_counts(), {"reason": "x"}, motifs,
                              Path("known.txt"), Path("esrp.txt"))
     text = json.dumps(rows)
     assert "anti-conservative" in text
     assert "one rMATS SE event, not one distinct target exon" in text
+    assert "rule B (from --gate-rule; never read from the arm name)" in text
     fisher = parse(*BASE[:4], "--out", str(tmp_path), "--up", "u", "--dn", "d", "--bg", "b",
-                   "--genome-root", "genomes", "--stat-method", "fisher")
+                   "--genome-root", "genomes", "--stat-method", "fisher", "--gate-rule", "A")
     fisher_text = json.dumps(skill.readme_rows(fisher, engine, ROOT, fake_counts(), {}, motifs,
                                                Path("k"), Path("e")))
     assert "counts MOTIF HITS, not exons" in fisher_text
@@ -377,7 +378,7 @@ def test_quick_mode_runs_end_to_end_on_the_synthetic_genome(synthetic, tmp_path)
                         "--stat-method", "fisher", "--known-motifs", str(motifs),
                         "--additional-motifs", "NA", "--alias-table", str(alias),
                         "--window", "4", "--step", "2", "--intron", "20", "--exon", "10",
-                        "--workers", "1", "--blas-threads", "1"], tmp_path)
+                        "--workers", "1", "--blas-threads", "1", "--gate-rule", "A"], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = json.loads((out / "run_manifest.json").read_text())
     assert manifest["status"] == "complete"      # audited Fisher: its positional archives are the required set
@@ -419,18 +420,18 @@ FIG_ARGS = ("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o", "--up", "u", "
             "--bg", "b")
 
 
-def test_figures_need_an_arm_rule_suffix_and_a_gate_record():
-    with pytest.raises(ValueError, match="<NAME>_<RULE>"):
-        skill.validate(parse("--mode", "quick", "--arm", "NOSUFFIX", "--out", "o",
+def test_presplit_input_needs_a_stated_rule_and_figures_need_a_gate_record():
+    with pytest.raises(ValueError, match="no event-set rule is stated"):
+        skill.validate(parse("--mode", "quick", "--arm", "NOSUFFIX_A", "--out", "o",
                              "--up", "u", "--dn", "d", "--bg", "b", "--gate-counts", "c.json"))
     with pytest.raises(ValueError, match="--gate-counts"):
-        skill.validate(parse(*FIG_ARGS))
-    with pytest.raises(ValueError, match="none is stated"):     # suffix T is not a rule
-        skill.validate(parse(*FIG_ARGS, "--gate-counts", "c.json"))
+        skill.validate(parse(*FIG_ARGS, "--gate-rule", "A"))
+    with pytest.raises(ValueError, match="never read as a rule"):
+        skill.validate(parse(*FIG_ARGS, "--no-figures"))
     skill.validate(parse(*FIG_ARGS, "--gate-counts", "c.json", "--gate-rule", "A"))
-    skill.validate(parse(*FIG_ARGS, "--no-figures"))
+    skill.validate(parse(*FIG_ARGS, "--no-figures", "--gate-rule", "B"))
     skill.validate(parse("--mode", "quick", "--arm", "NOSUFFIX", "--out", "o", "--up", "u",
-                         "--dn", "d", "--bg", "b", "--stat-method", "fisher"))
+                         "--dn", "d", "--bg", "b", "--stat-method", "fisher", "--gate-rule", "A"))
     with pytest.raises(ValueError, match="for pre-split inputs"):
         skill.validate(parse("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o",
                              "--rmats-se", "se.txt", "--filter", "f.json",
@@ -455,7 +456,7 @@ def test_gate_record_must_match_the_input_event_counts(synthetic, tmp_path):  # 
     args = parse("--mode", "quick", "--arm", "S_A", "--out", str(tmp_path / "o"),
                  "--up", str(paths["up"]), "--dn", str(paths["dn"]), "--bg", str(paths["bg"]),
                  "--genome-root", str(genome_root), "--genome", "synthetic",
-                 "--gate-counts", str(gate))
+                 "--gate-counts", str(gate), "--gate-rule", "A")
     (tmp_path / "o").mkdir()
     skill.prepare_inputs(args, tmp_path / "o", lambda m: None, {})
     record = json.loads((tmp_path / "o" / "event_counts.json").read_text())
@@ -543,7 +544,7 @@ def build_fork_figures(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     out, engine, counts_root, roots, motifs, alias, gtf = fork_data_engine_run(tmp_path)
     args = parse("--mode", "quick", "--arm", "QKI_KO_T", "--out", str(out),
-                 "--up", "u", "--dn", "d", "--bg", "b", "--gate-counts", "c.json",
+                 "--up", "u", "--dn", "d", "--bg", "b", "--gate-counts", "c.json", "--gate-rule", "A",
                  "--engine-root", str(ROOT), "--gtf", str(gtf),
                  "--spliceosome-list", str(tmp_path / "splice.txt"),
                  "--broad-binders-list", str(tmp_path / "broad.txt"),
@@ -571,6 +572,7 @@ def test_quick_mode_draws_the_four_main_layer_figures_on_the_fork_data_tables(tm
     assert "use for RBP ORDER only" in svg
     assert "n events (rMATS SE rows) included=20 / skipped=18 / background=200" in svg
     assert "0 foreground / 2 background events" in svg, "the footer must print the gate record"
+    assert "rule A" in svg, "the footer must print the stated rule (--gate-rule A), not the arm suffix T"
     assert "Dot size = motif-score ratio" in svg
     controls = result["controls"]
     assert len(controls) == 8 and all(r["pass"] for r in controls)

@@ -244,8 +244,9 @@ def exclusion_audit(arm, entries, lists):
     return audits, dropped
 
 
-def gate_counts(event_sets_root, arm, gate, counts_json=None):
-    """Event counts for one arm: an explicit counts.json, or the lab gate tree."""
+def gate_counts(event_sets_root, arm, gate, counts_json=None, rule=None):
+    """Event counts for one arm: an explicit counts.json, or the lab gate tree <arm>/<gate>_rule<rule>/ (the rule is
+    given, never read from the arm name)."""
     if counts_json:
         path = Path(counts_json)
         source = json.loads(path.read_text())
@@ -256,7 +257,10 @@ def gate_counts(event_sets_root, arm, gate, counts_json=None):
         raise ValueError(f'Need --counts-json {arm}=<path> or --event-sets-root')
     if gate != 'persample10_bm50_bgfdr0.5':
         raise ValueError('the lab gate tree layout requires persample10_bm50_bgfdr0.5')
-    base, rule = arm.rsplit('_', 1)
+    if rule is None:
+        raise ValueError(f'the lab gate tree is keyed by rule: pass --gate-rule {arm}=<A|B|Beffect>; the arm name '
+                         'is never read as a rule')
+    base = arm[:-len('_' + rule)] if arm.endswith('_' + rule) else arm
     path = Path(event_sets_root) / base / f'{gate}_rule{rule}' / 'counts.json'
     source = json.loads(path.read_text())
     counts = {k: int(source[k]) for k in ['n_up', 'n_dn', 'n_bg', 'n_expr_unknown_in_fg', 'n_expr_unknown_in_bg']}
@@ -569,13 +573,33 @@ def resolve_texts(args):
 
 
 def gate_rule_of(texts, arm):
-    """The event-set rule to print: the explicit one (--gate-rule, or the wrapper's gate record), else the arm suffix."""
-    return texts.get('rule') or (arm.rsplit('_', 1)[1] if '_' in arm else '')
+    """The event-set rule to print: --gate-rule or the gate record ('rule' of the arm's counts.json), never the arm
+    name. Refuses when none is stated."""
+    rule = texts.get('rule')
+    if not rule:
+        raise ValueError(f'no event-set rule stated for {arm}: pass --gate-rule {arm}=<A|B|Beffect> or a '
+                         "--counts-json record with a 'rule' field; the arm name is never read as a rule")
+    return rule
+
+
+GATE_RULE_CHOICES = ('A', 'B', 'Beffect')
+
+
+def arm_gate_rule(arm, cli_rule, counts_json):
+    """--gate-rule for this arm, else the 'rule' field of its --counts-json record; both must agree when both are
+    given. None when neither states one (gate_rule_of then refuses wherever the rule is printed)."""
+    record = json.loads(Path(counts_json).read_text(encoding='utf-8-sig')).get('rule') if counts_json else None
+    if record is not None and str(record) not in GATE_RULE_CHOICES:
+        raise ValueError(f'gate record {counts_json} states rule {record!r}, not one of {GATE_RULE_CHOICES}')
+    if cli_rule and record and cli_rule != record:
+        raise ValueError(f'--gate-rule {arm}={cli_rule} disagrees with the gate record {counts_json} (rule {record})')
+    return cli_rule or record
 
 
 def gate_lines(texts, arm, counts):
-    rule = gate_rule_of(texts, arm)
-    fields = _Keep(counts, rule=rule)
+    needs_rule = not texts['gate_text'] or '{rule}' in texts['gate_text']
+    rule = gate_rule_of(texts, arm) if needs_rule else texts.get('rule')
+    fields = _Keep(counts, **({'rule': rule} if rule else {}))
     if texts['gate_text']:
         raw = texts['gate_text'].replace('\\n', '\n').split('\n')
     else:
@@ -606,7 +630,7 @@ def sidecar_statements(texts, arm, counts, gate, sens_status):
     """The three provenance-sidecar sentences that describe the project, not the figure.
 
     Dissertation default (no --gate-text/--direction-text/--tail-text/--tail-text-supplement/--gate-record):
-    the reli_v121 gate + rule-from-arm-suffix sentence, the released-Fisher md5 sentence and the treatment-C
+    the reli_v121 gate + stated-rule sentence, the released-Fisher md5 sentence and the treatment-C
     length-run sentence, verbatim. Otherwise every sentence is derived from the same resolved text the footer
     prints, and nothing dissertation-specific is asserted."""
     n = (f'included {counts["n_up"]}, skipped {counts["n_dn"]}, background {counts["n_bg"]}')
@@ -1864,15 +1888,27 @@ def main(argv=None):
     ap.add_argument('--gate-record', default=None,
                     help='JSON with any of gate_text, direction_text, tail_text, tail_text_supplement; '
                          'command-line flags take precedence')
-    ap.add_argument('--gate-rule', choices=('A', 'B', 'Beffect'), default=None,
-                    help="single-arm runs: the event-set rule to print; default = the text after the arm's last _")
+    ap.add_argument('--gate-rule', action='append', default=[], metavar='[ARM=]RULE',
+                    help="repeatable; the event-set rule (A, B or Beffect) of an arm: ARM=RULE, or a bare RULE for a "
+                         "single-arm call. Else the 'rule' field of the arm's --counts-json record. The arm name is "
+                         "never read as a rule; an arm whose footer needs a rule and has none is refused")
     ap.add_argument('--length-root', default=None,
                     help='root holding <arm>/lengthmatched_report.json for the exon-length caveat clause')
     ap.add_argument('--v41-archive-name', default=None,
                     help='folder name of an archived v4.1 index to link from index.html')
     args = ap.parse_args(argv)
-    if args.gate_rule and len(args.arms) > 1:
-        ap.error('--gate-rule names the rule of one arm; give one arm per call')
+    args.gate_rules = {}
+    for value in args.gate_rule:
+        arm, sep, rule = value.rpartition('=')
+        if not sep:
+            if len(args.arms) > 1:
+                ap.error('a bare --gate-rule RULE names the rule of one arm; give one arm per call or ARM=RULE')
+            arm = args.arms[0]
+        if rule not in GATE_RULE_CHOICES or arm not in args.arms:
+            ap.error(f'--gate-rule {value}: expected [ARM=]RULE with ARM in --arms and RULE one of '
+                     f'{", ".join(GATE_RULE_CHOICES)}')
+        args.gate_rules[arm] = rule
+    args.gate_rule = None
     args.counts_json = dict(pair.split('=', 1) for pair in args.counts_json)
     for pair in args.arm_label:
         arm, _, text = pair.partition('=')
@@ -1903,7 +1939,9 @@ def main(argv=None):
     for arm in args.arms:
         dest = out / arm
         dest.mkdir(exist_ok=True)
-        counts, countpath = gate_counts(args.event_sets_root, arm, args.gate, args.counts_json.get(arm))
+        texts['rule'] = arm_gate_rule(arm, args.gate_rules.get(arm), args.counts_json.get(arm))
+        counts, countpath = gate_counts(args.event_sets_root, arm, args.gate, args.counts_json.get(arm),
+                                        texts['rule'])
         base_sources = [countpath, Path(args.naming_table),
                         Path(args.alias_table), Path(args.esrp_table), Path(args.spliceosome_list),
                         Path(args.broad_binders_list), Path(__file__).resolve()]

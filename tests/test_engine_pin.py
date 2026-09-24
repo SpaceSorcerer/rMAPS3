@@ -79,7 +79,7 @@ def test_cli_refuses_a_mismatched_engine_before_writing(engine_repo, tmp_path):
     proc = subprocess.run([sys.executable, str(ROOT / "tools" / "rmaps3_skill_run.py"), "--mode", "quick",
                            "--arm", "S_A", "--out", str(out), "--up", "u", "--dn", "d", "--bg", "b",
                            "--genome-root", "g", "--engine-root", str(repo), "--engine-commit", first[:7],
-                           "--no-figures"], cwd=ROOT, capture_output=True, text=True, timeout=300,
+                           "--no-figures", "--gate-rule", "A"], cwd=ROOT, capture_output=True, text=True, timeout=300,
                           env=dict(os.environ))
     assert proc.returncode == 2
     assert "not at the expected commit" in proc.stderr

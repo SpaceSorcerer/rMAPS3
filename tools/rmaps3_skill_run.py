@@ -57,7 +57,6 @@ STAT_CAVEATS = {
 }
 RELEASED_ENGINE_COMMIT = "b9a9dce"
 GATE_RULES = ("A", "B", "Beffect")
-RULE_B_SUFFIXES = ("B", "Beffect")
 # Run status, most severe first; the first that applies wins. --allow-partial only turns INCOMPLETE into
 # complete_partial, so it never hides a failed positive control.
 STATUS_PRECEDENCE = (
@@ -233,6 +232,7 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
     summary = {key: counts[key]["n_events"] for key in counts}
     record = {"n_up": summary["up"], "n_dn": summary["dn"], "n_bg": summary["bg"],
               "n_expr_unknown_in_fg": None, "n_expr_unknown_in_bg": None,
+              "rule": check_gate_rule(args, bool(args.rmats_se))[0],
               "source": {k: str(v) for k, v in sources.items()}}
     if args.gate_counts:
         gate = json.loads(Path(args.gate_counts).read_text(encoding="utf-8-sig"))
@@ -246,6 +246,7 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
     (out / "event_counts.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if args.rmats_se:
         built = json.loads((out / "event_sets" / "counts.json").read_text())
+        built.setdefault("rule", record["rule"])
         (out / "event_counts.json").write_text(json.dumps(built, indent=2) + "\n", encoding="utf-8")
     return paths, counts, fasta, fai
 
@@ -614,6 +615,8 @@ def readme_rows(args, engine_out: Path, engine_root: Path, counts, conversion, m
          ("archives reproduce the root tables" if conversion.get("verified") else "not run")),
         ("Direction", "up = the exon is MORE included in the treatment group; dn = LESS included"),
     ]
+    rule, source = check_gate_rule(args, bool(args.rmats_se))
+    rows.append(("Event-set rule", f"rule {rule} (from {source}; never read from the arm name)"))
     if args.gate_note:
         rows.append(("Gate", args.gate_note))
     return [{"field": k, "description": v} for k, v in rows]
@@ -1141,9 +1144,7 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                "--released-commit", git_revision(engine_root_of(args))[:7],
                "--released-stat-method", args.stat_method,
                "--top-n", str(args.top_n)]
-    rule = check_gate_rule(args, bool(args.rmats_se))[0]
-    if rule:
-        command += ["--gate-rule", rule]
+    command += ["--gate-rule", check_gate_rule(args, bool(args.rmats_se))[0]]
     if args.arm in set(args.underpowered_arms):
         command += ["--underpowered-arms", args.arm]
     if args.method_comparison:
@@ -1173,9 +1174,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dn")
     p.add_argument("--bg")
     p.add_argument("--gate-rule", choices=GATE_RULES, default=None,
-                   help="event-set rule the inputs were built under; overrides the arm-name suffix and must "
-                        "agree with a gate record that states one. Raw --rmats-se input is split by the "
-                        "portable rule-A builder, so it takes rule A only")
+                   help="event-set rule the inputs were built under; required for pre-split input unless the "
+                        "--gate-counts record states a 'rule' (both must agree when both are given). The arm name "
+                        "is never read as a rule. Raw --rmats-se input is split by the portable rule-A builder, so "
+                        "it takes rule A only")
     p.add_argument("--genome-root", default=None,
                    help="required: directory holding <genome>/<genome>.fa and its .fai")
     p.add_argument("--genome", default="hg38", help="FASTA build directory name, e.g. hg38 or mm10")
@@ -1270,10 +1272,7 @@ def validate(args) -> None:
                          "record <event_sets>/<ARM>/<gate>_rule<R>/counts.json) or --no-figures")
     if args.gate_counts and not presplit:
         raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
-    rule, _ = check_gate_rule(args, from_rmats)
-    if draws and rule is None:
-        raise ValueError("the figure footer prints the event-set rule, and none is stated: pass --gate-rule, a "
-                         "--gate-counts record with a 'rule' field, or name the arm <NAME>_<RULE>; or --no-figures")
+    check_gate_rule(args, from_rmats)
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
                 "refine_perms", "bootstraps", "top_n"):
         if getattr(args, key) < 1:
@@ -1283,11 +1282,6 @@ def validate(args) -> None:
         print(f"MOUSE REFERENCE IN PLAY: genome={args.genome} species={args.species}. "
               "Do not merge or compare this run with a human arm.", file=sys.stderr)
         print("*" * 78, file=sys.stderr)
-
-
-def arm_rule(arm: str):
-    """The rule the figure builder reads from the arm name: the text after the last '_', or None."""
-    return arm.rsplit("_", 1)[1] if "_" in arm else None
 
 
 def gate_record_rule(args):
@@ -1301,22 +1295,16 @@ def gate_record_rule(args):
 
 
 def check_gate_rule(args, from_rmats: bool):
-    """(effective rule, its source). The rule comes from --gate-rule or the gate record; the arm name is a label
-    and is read only when neither states a rule.
+    """(effective rule, its source): --gate-rule, else the gate record's 'rule'. The arm name is never read.
 
-    Raw --rmats-se input is split by the portable rule-A builder, so its rule is A: --gate-rule B/Beffect is
-    refused, and so is an arm named *_B / *_Beffect unless --gate-rule A says the suffix is not a rule label.
-    Pre-split input takes any rule; --gate-rule and the gate record must agree when both state one."""
-    suffix = arm_rule(args.arm)
+    Raw --rmats-se input is split by the portable rule-A builder, so its rule is A and --gate-rule B/Beffect is
+    refused. Pre-split input must state its rule by --gate-rule or a --gate-counts record with a 'rule' field;
+    both must agree when both state one. Every run prints the rule in versions.txt, the workbook README and the
+    figure footer."""
     if from_rmats:
         if args.gate_rule not in (None, "A"):
             raise ValueError(f"--gate-rule {args.gate_rule} with --rmats-se: the portable builder implements rule A "
                              "only. Rule B sets are frozen concordant files: supply pre-split inputs")
-        if args.gate_rule is None and suffix in RULE_B_SUFFIXES:
-            raise ValueError(f"arm {args.arm} names rule {suffix}, but --rmats-se input is split by the portable "
-                             "rule-A builder. Rule B sets are frozen concordant files: supply pre-split inputs "
-                             "(--up/--dn/--bg with --gate-counts) built under rule B, or pass --gate-rule A if "
-                             f"'{suffix}' is not a rule label")
         return "A", ("--gate-rule A" if args.gate_rule else "portable rule-A builder (--rmats-se)")
     record = gate_record_rule(args)
     if args.gate_rule and record and args.gate_rule != record:
@@ -1326,9 +1314,8 @@ def check_gate_rule(args, from_rmats: bool):
         return args.gate_rule, "--gate-rule"
     if record:
         return record, f"gate record {args.gate_counts}"
-    if suffix in GATE_RULES:
-        return suffix, "arm name (no --gate-rule, no rule in a gate record)"
-    return None, None
+    raise ValueError("no event-set rule is stated for pre-split input: pass --gate-rule A|B|Beffect, or a "
+                     "--gate-counts record with a 'rule' field. The arm name is never read as a rule")
 
 
 def require_site_paths(args) -> None:
@@ -1382,6 +1369,7 @@ def main(argv=None) -> int:
         + f"\nengine\t{args.engine}"
         + f"\nengine_commit_verified_clean\t{engine_sha or 'not applicable (audited engine = this checkout)'}"
         + f"\nseed\t{args.seed}"
+        + f"\ngate_rule\t{manifest['effective_gate_rule']}\t{manifest['effective_gate_rule_source']}"
         + f"\ngenerated\t{time.strftime('%Y-%m-%dT%H:%M:%S')}\n", encoding="utf-8")
     log("command: " + manifest["command"])
     env = os.environ.copy()
