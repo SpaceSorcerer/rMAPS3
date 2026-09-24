@@ -140,135 +140,107 @@ Open `http://127.0.0.1:5000`.
 
 See [`docs/FAQ.md`](docs/FAQ.md) for common setup and runtime issues.
 
-## Running on rMATS-turbo 4.3.0 output (pre-split mode) — lab workflow
+## Lab fork: branch `lab/miat-qki`
 
-Pre-split SE inputs make foreground/background selection explicit and reproducible.
-The native rMATS classifier and standalone `exon-sets se` helper do not implement
-the lab's coverage/expression gates; the latter also assumes obsolete expression
-columns and emits a different coordinate schema. Use
-[`tools/build_event_sets.py`](tools/build_event_sets.py) through the wrapper below.
-Its portable Rule-A builder adapts the frozen `reli_v121` selection logic, with
-source attribution retained in the file. Rule-B rMATS/VAST concordant selection
-requires externally prepared pre-split sets; it is not rebuilt by this wrapper.
+This branch adds a lab layer on top of the collaborators' engine. `main` mirrors upstream
+`b9a9dce` (tag `upstream-base-2026-09-16`). The SE engine repairs are `eaeb303`, `c34776b`
+(tag `audited-engine-2026-09-16`) and `3faead9`. Everything else lives in `tools/`, `tests/`,
+`data/`, `configs/` and `docs/`. Release tag: `lab-v1.0-2026-09-24`.
+[LESSONS.md](LESSONS.md) records every decision below with its date and evidence. Scope is human /
+GRCh38 (hg38) / GENCODE v49 unless the inputs say otherwise, and SE events only.
 
-Each of `up`, `dn` and `bg` is a nonempty tab-separated file with this mandatory
-eight-column header (the spaces displayed here must be tabs in the actual file):
+### Layer stack
+
+| Layer | What it is | Report it as | Produced by |
+|---|---|---|---|
+| Main | The authors' released engine (`b9a9dce`) run with `--stat-method mannwhitney`: a one-sided rank-sum on per-exon motif hit counts, reduced to the smallest p over the 50-nt windows of a region | RBP ORDER only. Its p is scipy's tie-corrected normal approximation on >99 % zeros and is severely anti-conservative | the engine, then `tools/countdist_to_npz.py` and `tools/verify_ranksum_archives.py` |
+| Supplement | The same statistic with a Westfall–Young label-permutation p over target-exon clusters (two stages, seed 149), BH q over unique k-mers, and RBP-level min-P over each RBP's motifs | the p and q to report | `tools/calibrate_ranksum_v2.py` (calibration v2.1) |
+| Sensitivities | Row-unit calibration (`*_rowunit` columns), row vs target-exon unit, length-matched background, method comparison, count-aware tests | labelled comparisons, never the p | `calibrate_ranksum.py`, `unit_sensitivity.py`, `length_matched.py`, `compare_stat_methods.py`, `count_aware_stats.py` |
+| Stability | Foreground-bootstrap rank stability on an audited Fisher run | how many top RBPs are reproducible | `tools/rank_stability.py` |
+| Figures | Region lollipops, version 4.3.2: both layers, by-RBP and by-motif, with and without core-spliceosome and broad binders | — | `tools/build_region_lollipops_v4.py` |
+
+Rules that follow from the stack:
+
+- Lab statistics are never painted onto the tool's own output.
+- One figure never mixes two engines, two statistics or two permutation units.
+- Every count reads "n events (rMATS SE rows) over N target exons".
+
+The audited engine's `mannwhitney` binarizes before ranking, so it is not an alternative main
+layer. The audited Fisher layer of 2026-09-16 is superseded. `tools/summarize_rmaps_regions*.py`
+and `tools/rmaps3_lab_run.py` remain for reproduction.
+
+### Tools and skills
+
+[`tools/README.md`](tools/README.md) lists every tool with its purpose, layer and status
+(CANONICAL / SENSITIVITY / SUPERSEDED). Two lab skills wrap
+[`tools/rmaps3_skill_run.py`](tools/rmaps3_skill_run.py):
+
+- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`.
+- **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.2 figures of both layers and the rank workbook.
+
+The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
+GENCODE GTF and the two exclusion lists explicitly. The skills hold the lab's values.
+
+### Reproduce one arm end to end
+
+A checkout of the released engine is needed. For example:
+
+```bash
+git worktree add ../rMAPS3_upstream upstream-base-2026-09-16
+```
+
+Then, from the repository root, with pre-split inputs and their gate record:
+
+```bash
+python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO_B \
+  --up up.coord.txt --dn dn.coord.txt --bg bg.coord.txt --gate-counts counts.json \
+  --genome-root genomedata --genome hg38 \
+  --engine released --engine-root ../rMAPS3_upstream --stat-method mannwhitney \
+  --permutations 2000 --refine-perms 100000 --seed 149 \
+  --gtf gencode.v49.primary_assembly.annotation.gtf \
+  --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt \
+  --positive-control QKI
+```
+
+`--rmats-se SE.MATS.JC.txt --filter gates.json` replaces the three set flags and
+`--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`. The output root
+must be absent or empty.
+
+The same chain, step by step, reads and writes explicit roots:
+
+```bash
+python tools/countdist_to_npz.py --arm QKI_KO_B --released-root runs --out-root counts
+python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root runs --counts-root counts
+python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary_rowunit --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --permutation-unit row --seed 149
+python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --rowunit-root summary_rowunit --seed 149
+python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --event-sets-root event_sets --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
+```
+
+Here `runs/QKI_KO_B/` is the released engine's output directory, run with `--keep-temp`.
+
+Checks to read before trusting a run:
+
+- `counts/<ARM>/VERIFY.md` shows that the archives reproduce the root tables. A mismatch aborts the run.
+- `summary/<ARM>/refinement_report.json` gives the stage record, the BH family sizes, and the events and target exons per set.
+- `figures/positive_control_audit.tsv` checks, on a QKI-KO arm, that QKI ranks first in INCLUDED × Upstream Intron and SKIPPED × Downstream Intron.
+
+### Pre-split input format
+
+Each of `up`, `dn` and `bg` is a nonempty tab-separated file with this mandatory eight-column
+header. The spaces shown here must be tabs in the file.
 
 ```text
 chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd
 ```
 
-- Starts are zero-based and ends exclusive. Keep rMATS starts and ends unchanged.
-  `firstExon` is genomic-left and `secondExon` genomic-right, on both strands;
-  use `+`/`-`. Do not add gene identifiers to the eight-column file.
-- Lab foreground: FDR < 0.05, |dPSI| >= 0.10, IJC+SJC >= 10 in **every sample**,
-  and DESeq2 baseMean > 50. Absent expression records are `expr_unknown` and
-  retained. Apply coverage/expression gates symmetrically to background,
-  require background FDR >= 0.5, and remove foreground events.
-- Direction follows the configured treatment group and rMATS dPSI sign; record
-  group identity explicitly. Human lab references are GRCh38/hg38, GENCODE v49;
-  the motif engine reads the specified FASTA, not a GTF.
-- The wrapper checks chromosome names against `<root>/<build>/<build>.fa.fai`.
-  It can add/remove `chr` only to match an existing key (including scaffold names);
-  unresolved names fail. This is name normalization, not a genome-build conversion.
+- **Coordinates.** Starts are zero-based and ends exclusive; keep rMATS values unchanged. `firstExon` is genomic-left and `secondExon` genomic-right on both strands. Strand is `+`/`-`. Do not add gene identifiers.
+- **Lab gate.** The lab uses the RBP-RELI `reli_v121` ledger gate. Its four named parts are rMATS FDR, |dPSI|, IJC+SJC in every sample, and DESeq2 baseMean.
+  - Background takes the same coverage and expression gates plus a high-FDR floor, with the foreground removed.
+  - Genes absent from the expression table are `expr_unknown` and retained.
+  - Read the values from the gate ledger, not from this README.
+- **Chromosome names.** Names are checked against `<root>/<build>/<build>.fa.fai`. A literal `chr` is added or removed only when that resolves an existing key; unresolved names fail. This is name normalisation, not liftover.
+- **Engine outputs.** Root `pVal.*.RNAmap.txt` tables hold raw regional minima, not calibrated region p-values. Keep `temp/` until the archives verify. The wrapper deletes only verified temporaries and logs each one with its md5.
 
-Edit a copy of [`configs/example_miat_qki.json`](configs/example_miat_qki.json)
-or [`configs/example_generic.json`](configs/example_generic.json), then run:
-
-```bash
-python tools/rmaps3_lab_run.py --config configs/example_miat_qki.json
-```
-
-Paths in config files resolve relative to the config's directory. Set either
-`inputs.up/dn/bg` or `inputs.rmats_se` plus gates and optional `inputs.deseq2`;
-set `genome.root/build`, `motifs.known/additional`, `output_root`, `engine`,
-`blas_threads`, and `summary`. Output roots must be absent or empty. The wrapper
-writes prepared `inputs/`, `engine/`, `summary/`, and a `run_manifest.json` with
-config hash, revision, versions, input MD5s and step records. The `.yaml` examples
-contain the same settings but require an already installed PyYAML; otherwise YAML
-is rejected clearly and the JSON companions work without it. The wrapper adds
-no package installation step.
-
-The corresponding direct engine invocation from the repository root is:
-
-```bash
-python cli.py motif-map se --known-motifs data/knownMotifs.human.mouse.txt --motifs data/ESRP.like.motif.txt --fasta-root genomedata --genome hg38 --rMATS NA --miso NA --up inputs/up.coord.txt --down inputs/dn.coord.txt --background inputs/bg.coord.txt --output results/MIAT_KD/engine --stat-method fisher --fisher-alternative greater --workers 4 --intron 250 --exon 50 --window 50 --step 1 --keep-temp
-```
-
-Set `RMAPS_FORCE_MOTIF_FALLBACK=1` when using the tested simplified Pillow plots.
-The wrapper configures BLAS thread caps before launching children; the lab example
-uses four threads and one summarizer worker. On Windows a venv launcher can spawn
-a different base interpreter, so inspect the active child process before diagnosing
-an idle job. Use one summarizer worker if spawn fails with `DuplicateHandle`.
-
-Keep `temp/` positional p-values and count distributions, plus
-`positional/*.hits.npz`, `exon/` coordinate files and the engine manifest.
-The NPZ schema is version 2 and readers must preserve eligibility masks;
-`rmaps_core.positional_io` provides the readers. Root `pVal.*.RNAmap.txt` tables
-contain raw regional minima, not calibrated region p-values. The wrapper runs
-the copied v4 summarizer automatically; a separate invocation is:
-
-```bash
-python tools/summarize_rmaps_regions.py --run results/MIAT_KD/engine --out results/MIAT_KD/summary --arm MIAT_KD --perms 2000 --seed 149 --workers 1
-```
-
-The summarizer preserves v4's exact log-space hypergeometric-tail arithmetic and
-Westfall–Young min-P label permutations. It reports the native layer alongside
-calibrated pooled regions (upstream intron, exon body, downstream intron), with BH
-across motif × plotted pool × direction. BH on native raw minima is descriptive
-and does not correct their within-region selection. Flanking-exon results are
-retained outside that calibrated plotting family. Outputs include
-`per_motif_regions.tsv`, `condensed_per_rbp.tsv`, `positions_long.tsv` and the
-arm's summary workbook. The condensed best-motif rows retain motif-level q-values;
-they are not a separate RBP-level hypothesis test. This calibration supports
-one-sided greater Fisher runs; the wrapper rejects other methods before execution.
-Use `--perms 20` on the wrapper only for a synthetic smoke test.
-
-Read [the migration note](docs/MIGRATION_2026-09.md) for complete-window geometry,
-changed FASTA crops, temporary-output retention and schemas; read
-[LESSONS.md](LESSONS.md) for source/commit evidence and historical reproduction
-limits. The corrected engine is not numerically equivalent to the old web-server
-calculation merely because both report Fisher p-values.
-
-### Rank-sum layers: which statistic to report, and how to calibrate it — lab workflow
-
-The reported layer is the authors' released engine run with `--stat-method mannwhitney`. That option ranks one
-observation per eligible exon per window — the exon's motif hit count — which is the published rMAPS/rMAPS2
-observational unit and the only built-in option with a defensible sampling model; the Fisher default sums hits
-into a table whose margins are exon counts. Its p-values, however, come from scipy's asymptotic normal
-approximation with tie correction and the default continuity correction, and with more than 99 % of eligible
-exons carrying no hit that approximation is severely anti-conservative. Report this layer for the ORDER of RBPs
-and say so explicitly; do not quote its p-values as p-values. Note that the audited engine's own `mannwhitney`
-path is not an alternative: it binarizes before ranking (`rmaps_core/se_windows.py`, `WindowCounts.observations`),
-so it scores the same 2x2 as the audited Fisher test. See [LESSONS.md](LESSONS.md) for the worked example.
-
-The supplement is the same statistic with a Westfall–Young min-P label-permutation p and BH q, and it is the
-p and q to report. Since 2026-09-22 it is produced by
-[`tools/calibrate_ranksum_v2.py`](tools/calibrate_ranksum_v2.py): labels are permuted over target-exon clusters
-(rMATS rows sharing chr/strand/exonStart/exonEnd move together and are never deduplicated), the RBP-level p is
-min-P over the RBP's motifs inside the permutation (max-z and mean-z as sensitivity columns), and motif keys that
-share one k-mer are tested once. [`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) is the row-unit v1,
-kept only to produce the `*_rowunit` sensitivity columns. Calibration leaves the RBP order essentially unchanged
-and removes most of the apparent significance, which is exactly the claim the main layer should make.
-Run the tools in this order: [`tools/compare_stat_methods.py`](tools/compare_stat_methods.py) to decide which
-layer to report and to record how far the methods disagree;
-[`tools/countdist_to_npz.py`](tools/countdist_to_npz.py) to pack the released `temp/*.countDist.*.txt` tables of
-an arm into per-motif count archives, then
-[`tools/verify_ranksum_archives.py`](tools/verify_ranksum_archives.py) to prove those archives reproduce the
-released root and per-position p-values before anything downstream reads them;
-[`tools/calibrate_ranksum.py`](tools/calibrate_ranksum.py) `--permutation-unit row` for the row-unit
-sensitivity, then [`tools/calibrate_ranksum_v2.py`](tools/calibrate_ranksum_v2.py) for the reportable
-supplement; and
-[`tools/build_region_lollipops_v4.py`](tools/build_region_lollipops_v4.py) for the figures.
-[`tools/count_aware_stats.py`](tools/count_aware_stats.py) is separate: it recomputes count-aware rank and
-Poisson-rate tests from the audited engine's `positional/*.hits.npz` archives, for comparison only. Every tool
-takes its input and output roots as required arguments; none carries a site-specific path.
-
-```bash
-python tools/compare_stat_methods.py --arms QKI_KO_B --runs-root runs --stat-root stat --alias alias.tsv --out results/comparison
-python tools/countdist_to_npz.py --arm QKI_KO_B --released-root stat/released_mannwhitney --out-root results/counts
-python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root stat/released_mannwhitney --counts-root results/counts
-python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary_rowunit --alias-table alias.tsv --permutation-unit row --seed 149
-python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root results/counts --released-root stat/released_mannwhitney --out-root results/summary --alias-table alias.tsv --rowunit-root results/summary_rowunit --seed 149
-python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root results/figures --released-root stat/released_mannwhitney --calibrated-root results/summary --method-comparison results/comparison/method_rank_comparison.tsv --event-sets-root event_sets --alias-table alias.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
-```
+Read [the migration note](docs/MIGRATION_2026-09.md) for complete-window geometry, FASTA
+crops and the NPZ schema. The repaired engine is not numerically equivalent to the old
+web-server calculation merely because both report Fisher p-values.
