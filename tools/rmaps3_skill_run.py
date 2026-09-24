@@ -824,47 +824,117 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     return result
 
 
-# ------------------------------------------------------------------ index page
+# ------------------------------------------------------------------ completeness inventory
+# Every artefact a complete run must have: REQUIRED_ARTIFACTS[mode][engine][stat] = (label, path template, expand,
+# condition). Templates are relative to --out; {arm} is the arm, {motif} each motif key of the engine's root tables,
+# {region} each of the eight sub-regions. condition: None = always; "figures" = unless --no-figures; "stability" =
+# with --rank-stability-run; "final" = written after the status is set (command.log closes, then md5.txt), checked
+# last. A run is `complete` only when every path exists, is non-empty and has its sha256 in run_manifest.json.
+_ROOT_TABLES = [("engine root table (included)", "engine/{arm}/pVal.up.vs.bg.RNAmap.txt", None, None),
+                ("engine root table (skipped)", "engine/{arm}/pVal.dn.vs.bg.RNAmap.txt", None, None),
+                ("event counts", "event_counts.json", None, None),
+                ("quick workbook", "quick_summary.xlsx", None, None)]
+_PROVENANCE = [("index page", "index.html", None, None), ("versions record", "versions.txt", None, None),
+               ("command log", "command.log", None, "final"), ("md5 record", "md5.txt", None, "final")]
+_COUNT_ARCHIVES = [("count archive", "counts/{arm}/{motif}.counts.npz", "motif", None),
+                   ("conversion manifest", "counts/{arm}/conversion_manifest.tsv", None, None)]
+_VERIFY = [("archive verification record", "counts/{arm}/VERIFY.md", None, None)]
+_POSITIONAL = [("audited positional archive", "engine/{arm}/positional/{motif}.{region}.hits.npz", "motif_region",
+                None)]
+_QUICK_FIGURES = [("main-layer figure", "figures/{arm}_SE_%s_released_ranksum_rawP%s.%s"
+                   % (kind, "" if variant == "main" else "_" + variant, ext), None, "figures")
+                  for variant in ("main", "noSpliceosome_noBroad") for kind in ("byRBP", "byMotif")
+                  for ext in ("png", "svg")] + [
+                  ("main-layer figure audit", "figures/" + name, None, "figures")
+                  for name in ("selection_audit.tsv", "exclusion_audit.tsv", "naming_audit.tsv", "layout_report.json")]
+_CALIBRATION = [("calibrated supplement " + name, "summary/{arm}/" + name, None, None)
+                for name in ("{arm}_calibrated_ranksum_v2.xlsx", "per_motif_regions.tsv", "condensed_per_rbp.tsv",
+                             "rbp_level.tsv", "refinement_report.json", "readout.md")] + [
+               ("row-unit sensitivity " + name, "summary_rowunit/{arm}/" + name, None, None)
+               for name in ("per_motif_regions.tsv", "condensed_per_rbp.tsv", "refinement_report.json", "readout.md")]
+_FULL_FIGURES = [("region lollipop (%s)" % layer, "figures/{arm}/{arm}_SE_%s_%s%s.%s"
+                  % (kind, layer, "" if variant == "main" else "_" + variant, ext), None, None)
+                 for layer in ("released_ranksum_rawP", "calibrated_ranksum")
+                 for variant in ("main", "noSpliceosome_noBroad") for kind in ("byRBP", "byMotif")
+                 for ext in ("png", "svg")] + [
+                 ("figure index", "figures/index.html", None, None),
+                 ("rank workbook", "figures/{arm}/{arm}_rank_comparison.xlsx", None, None),
+                 ("rank stability workbook", "stability/{arm}_rank_stability.xlsx", None, "stability")]
+REQUIRED_ARTIFACTS = {
+    "quick": {
+        "released": {"mannwhitney": _ROOT_TABLES + _COUNT_ARCHIVES + _VERIFY + _QUICK_FIGURES + _PROVENANCE,
+                     # a Fisher run cannot be verified (the verifier recomputes the rank-sum) and draws no figures
+                     "fisher": _ROOT_TABLES + _COUNT_ARCHIVES + _PROVENANCE},
+        # the archive reader targets the released countDist schema; the audited engine writes its own archives
+        "audited": {"mannwhitney": _ROOT_TABLES + _POSITIONAL + _PROVENANCE,
+                    "fisher": _ROOT_TABLES + _POSITIONAL + _PROVENANCE},
+    },
+    "full": {  # validate() refuses every other engine x statistic in full mode
+        "released": {"mannwhitney": _ROOT_TABLES + _COUNT_ARCHIVES + _VERIFY + _CALIBRATION + _FULL_FIGURES
+                                    + _PROVENANCE},
+    },
+}
+
+
+def required_spec(args) -> list:
+    """The REQUIRED_ARTIFACTS rows that apply to this run (conditions resolved, "final" rows kept)."""
+    try:
+        rows = REQUIRED_ARTIFACTS[args.mode][args.engine][args.stat_method]
+    except KeyError:
+        raise ValueError(f"no required-artefact inventory for --mode {args.mode} --engine {args.engine} "
+                         f"--stat-method {args.stat_method}") from None
+    wanted = {None, "final"}
+    if not args.no_figures:
+        wanted.add("figures")
+    if getattr(args, "rank_stability_run", None):
+        wanted.add("stability")
+    return [row for row in rows if row[3] in wanted]
+
+
 def required_artefacts(args) -> list:
-    """The deliverables this engine x statistic x mode promises, beyond the engine's two root tables and
-    quick_summary.xlsx, which every run needs (a run without them fails, exit 1).
-
-    released + mannwhitney: count archives that reproduce the root tables (VERIFY.md), and in quick mode the
-        main-layer figures unless --no-figures.
-    released + fisher: count archives converted from the countDist temporaries; the verifier recomputes
-        the rank-sum statistic, so a Fisher run cannot be verified and keeps its temporaries.
-    audited (either statistic): the engine's own positional/*.hits.npz; the archive reader targets the
-        released schema, and the figures draw the released rank-sum only.
-    """
-    if args.engine == "audited":
-        return ["audited positional archives (engine positional/*.hits.npz)"]
-    if args.stat_method == "fisher":
-        return ["converted count archives (countDist -> npz; a Fisher run cannot be verified)"]
-    needed = ["verified count archives (VERIFY.md)"]
-    if figures_wanted(args):
-        needed.append("main-layer figures")
-    return needed
+    """Path templates of every required artefact, for the index page and run_manifest.json."""
+    return [template.replace("{arm}", args.arm) for _, template, _, _ in required_spec(args)]
 
 
-def missing_deliverables(args, conversion, figures, engine_out=None) -> list:
-    """What this engine x statistic x mode promised (required_artefacts) but the run did not produce."""
+def required_paths(args, motifs, final=False) -> list:
+    """(label, relative path) of every required artefact, expanded over the root-table motifs and sub-regions.
+    final=False lists what exists before the status is set; final=True lists command.log and md5.txt."""
+    out = []
+    for label, template, expand, condition in required_spec(args):
+        if (condition == "final") != final:
+            continue
+        base = template.replace("{arm}", args.arm)
+        if expand is None:
+            out.append((label, base))
+        elif expand == "motif":
+            out += [(label, base.replace("{motif}", m)) for m in motifs]
+        else:
+            out += [(label, base.replace("{motif}", m).replace("{region}", r)) for m in motifs for r in io.REGIONS]
+    return out
+
+
+def inventory(out: Path, required) -> tuple:
+    """(hashed rows, missing lines): every required path must exist and be non-empty; each present one is
+    sha256-hashed. Missing paths are grouped by label, so a partial archive conversion reads '3 of 726 absent'."""
+    rows, absent, total = [], {}, {}
+    for label, rel in required:
+        total[label] = total.get(label, 0) + 1
+        path = out / rel
+        if not path.is_file():
+            absent.setdefault(label, []).append((rel, "absent"))
+        elif path.stat().st_size == 0:
+            absent.setdefault(label, []).append((rel, "empty"))
+        else:
+            rows.append({"artefact": label, "path": rel, "bytes": path.stat().st_size, "sha256": sha256(path)})
     missing = []
-    if args.engine == "audited":
-        positional = Path(engine_out) / "positional" if engine_out is not None else None
-        if positional is None or not any(positional.glob("*.hits.npz")):
-            missing.append(f"audited positional archives: no *.hits.npz under {positional}")
-        return missing
-    if args.stat_method == "fisher":
-        if not conversion.get("converted"):
-            missing.append("converted count archives: " + (conversion.get("reason") or "conversion did not run"))
-        return missing
-    if not conversion.get("verified"):
-        missing.append("verified count archives: " + (conversion.get("reason") or "verification did not run"))
-    if figures_wanted(args) and not (figures or {}).get("figures"):
-        missing.append("main-layer figures: " + ((figures or {}).get("skipped") or "not drawn"))
-    return missing
+    for label, items in absent.items():
+        first = "; ".join(f"{rel} {why}" for rel, why in items[:3])
+        missing.append(f"{label}: {len(items)} of {total[label]} absent or empty ({first}"
+                       + (", ..." if len(items) > 3 else "") + ")")
+    return rows, missing
 
 
+# ------------------------------------------------------------------ index page
 def run_status(missing, allow_partial: bool, control_failed: bool, failed: bool = False):
     """(status, exit code): the first row of STATUS_PRECEDENCE whose condition holds."""
     holds = {"failed": failed, "INCOMPLETE": bool(missing) and not allow_partial,
@@ -898,8 +968,9 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
         f"<p>Mode <b>{esc(args.mode)}</b>; engine <b>{esc(args.engine)}</b>; statistic "
         f"<b>{esc(args.stat_method)}</b>; {esc(args.species)} / {esc(args.genome)}; SE events only.</p>",
         f"<p><b>{esc(STAT_CAVEATS[args.stat_method])}</b></p>",
-        f"<p>Complete for this engine and statistic means: the two root tables, quick_summary.xlsx and "
-        f"{esc('; '.join(required_artefacts(args)))}.</p>",
+        f"<p>Complete for this mode, engine and statistic means: every required artefact path exists, is "
+        f"non-empty and has its sha256 in run_manifest.json; the per-motif paths expand over every motif of the "
+        f"root tables. Required: {esc('; '.join(required_artefacts(args)))}.</p>",
         *([f'<p style="color:#D55E00"><b>{"PARTIAL (--allow-partial)" if args.allow_partial else "INCOMPLETE"}'
            f" run. Missing: {esc('; '.join(missing))}</b></p>"] if missing else []),
         "<h2>Event sets</h2><table><tr><th>set</th><th>n events</th><th>file</th></tr>",
@@ -1366,20 +1437,32 @@ def main(argv=None) -> int:
             else:
                 figures = build_quick_figures(args, out, engine_out, roots, root_motifs, scores,
                                               alias, known, additional, log)
-        missing = missing_deliverables(args, conversion, figures, engine_out)
+        # Completeness: every required path exists, is non-empty and is sha256-hashed into the manifest. The
+        # index is written after the others are checked (it prints what is missing), then checked itself.
+        required = required_paths(args, root_motifs)
+        hashed, missing = inventory(out, [r for r in required if r[1] != "index.html"])
+        if (figures or {}).get("skipped") and not args.no_figures and any(
+                c == "figures" for _, _, _, c in required_spec(args)):
+            missing.append("main-layer figures not drawn: " + figures["skipped"])
         write_index(args, out, engine_out, counts, controls, conversion, extras, figures, missing)
+        index_rows, index_missing = inventory(out, [r for r in required if r[1] == "index.html"])
+        hashed += index_rows
+        missing += index_missing
+        manifest["inventory"] = hashed
         figure_controls = (figures or {}).get("controls", [])
-        manifest.update(status="complete", engine_wall_seconds=wall,
+        manifest.update(status="inventory_checked", engine_wall_seconds=wall,
                         n_motifs=len(motifs), conversion=conversion,
                         positive_control=controls, figure_positive_control=figure_controls,
                         figures=[str(p) for p in (figures or {}).get("figures", [])],
                         figures_skipped=(figures or {}).get("skipped"),
-                        event_counts={k: counts[k]["n_events"] for k in counts}, missing=missing)
+                        event_counts={k: counts[k]["n_events"] for k in counts}, missing=missing,
+                        root_motifs=root_motifs)
         checks = controls + figure_controls
         control_failed = bool(checks) and not all(row["pass"] for row in checks) and not args.positive_control_advisory
         for item in missing:
             log("MISSING " + item)
         manifest["status"], exit_code = run_status(missing, args.allow_partial, control_failed)
+        manifest["control_failed"] = control_failed
     except Exception as exc:  # recorded, then re-raised through the exit code
         manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         log(f"FAILED {type(exc).__name__}: {exc}")
@@ -1387,16 +1470,26 @@ def main(argv=None) -> int:
     finally:
         manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
         manifest["wall_seconds"] = time.perf_counter() - started
-        (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n",
-                                               encoding="utf-8")
         log(f"exit={exit_code} wall_s={manifest['wall_seconds']:.1f}")
         log.close()
-        # Hashed last: command.log is closed with its exit line, so md5.txt matches every file as left.
+        # command.log is closed with its exit line; md5.txt then records every file as left except itself and
+        # run_manifest.json, which is written last and carries the sha256 of every required artefact,
+        # md5.txt and command.log included (a file cannot carry its own hash).
         with open(out / "md5.txt", "w", encoding="utf-8") as handle:
             handle.write("md5\tbytes\tpath\n")
             for path in sorted(out.rglob("*")):
-                if path.is_file() and path.name != "md5.txt":
+                if path.is_file() and path.name not in ("md5.txt", "run_manifest.json"):
                     handle.write(f"{md5(path)}\t{path.stat().st_size}\t{path}\n")
+        if manifest["status"] != "failed":
+            final_rows, final_missing = inventory(out, required_paths(args, manifest.get("root_motifs", []),
+                                                                      final=True))
+            manifest["inventory"] = manifest.get("inventory", []) + final_rows
+            if final_missing:
+                manifest["missing"] = manifest.get("missing", []) + final_missing
+                manifest["status"], exit_code = run_status(manifest["missing"], args.allow_partial,
+                                                           manifest.get("control_failed", False))
+        (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n",
+                                               encoding="utf-8")
     return exit_code
 
 

@@ -67,9 +67,13 @@ def test_md5_record_matches_every_file_as_left_including_the_closed_command_log(
     for line in (out / "md5.txt").read_text(encoding="utf-8").splitlines()[1:]:
         digest, size, path = line.split("\t", 2)
         recorded[Path(path)] = (digest, int(size))
-    assert out / "command.log" in recorded and out / "run_manifest.json" in recorded
+    assert out / "command.log" in recorded
     for path, (digest, size) in recorded.items():
         data = path.read_bytes()
         assert (hashlib.md5(data).hexdigest(), len(data)) == (digest, size), path
-    on_disk = {p for p in out.rglob("*") if p.is_file() and p.name != "md5.txt"}
+    # run_manifest.json is written last and carries the sha256 of md5.txt; it cannot carry its own hash
+    on_disk = {p for p in out.rglob("*") if p.is_file() and p.name not in ("md5.txt", "run_manifest.json")}
     assert on_disk == set(recorded)
+    hashed = {row["path"]: row["sha256"] for row in json.loads((out / "run_manifest.json").read_text())["inventory"]}
+    assert hashed["md5.txt"] == hashlib.sha256((out / "md5.txt").read_bytes()).hexdigest()
+    assert hashed["command.log"] == hashlib.sha256((out / "command.log").read_bytes()).hexdigest()
