@@ -1,4 +1,5 @@
 """Release documentation contract: cited documents are tracked, CI runs the lab suite, the report states HEAD's count."""
+import os
 import re
 import subprocess
 import sys
@@ -70,8 +71,13 @@ def test_consolidation_report_states_the_test_count_pytest_collects_at_head():
     assert int(stated.group(1)) == int(collected.group(1))
 
 
-# ------------------------------------------------------------------ v1.0.1c: skills and docs match the wrapper
-SKILLS = {name: Path.home() / ".claude" / "skills" / name / "SKILL.md" for name in ("rmaps3-quick", "rmaps3-full")}
+# ------------------------------------------------------------------ v1.0.1c/d: skills and docs match the wrapper
+# The two lab skills are part of the release contract: a copy of each is committed under docs/skills/ and must be
+# byte-identical to the live skill (RMAPS_SKILLS_DIR, default ~/.claude/skills). An absent live skill is a failure.
+SKILL_NAMES = ("rmaps3-quick", "rmaps3-full")
+SKILLS_DIR = Path(os.environ.get("RMAPS_SKILLS_DIR", Path.home() / ".claude" / "skills"))
+SKILLS = {name: SKILLS_DIR / name / "SKILL.md" for name in SKILL_NAMES}
+COMMITTED = {name: ROOT / "docs" / "skills" / name / "SKILL.md" for name in SKILL_NAMES}
 GATE_SENTENCE = ("The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the "
                  "arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer.")
 TWO_STAGE_CLAUSE = "reports its stage-2 p only when its own stage-1 p"
@@ -82,10 +88,27 @@ RETIRED_PHRASES = (
 )
 
 
+def live_skills():
+    missing = [str(path) for path in SKILLS.values() if not path.is_file()]
+    assert not missing, ("the rmaps3-quick and rmaps3-full skills are part of the release contract and must be "
+                         f"present; absent: {missing} (set RMAPS_SKILLS_DIR to the directory holding them)")
+    return SKILLS
+
+
 def lab_docs():
     docs = {"README.md": ROOT / "README.md", "tools/README.md": ROOT / "tools" / "README.md"}
-    docs.update({k: v for k, v in SKILLS.items() if v.is_file()})
+    docs.update({f"live {k}": v for k, v in live_skills().items()})
+    docs.update({f"docs/skills/{k}": v for k, v in COMMITTED.items()})
     return {k: v.read_text(encoding="utf-8").replace("\r\n", "\n") for k, v in docs.items()}
+
+
+def test_live_skills_are_present_and_the_committed_copies_are_byte_identical():
+    for name, live in live_skills().items():
+        committed = COMMITTED[name]
+        assert committed.is_file(), f"{committed} is not in the checkout"
+        assert tracked(committed.relative_to(ROOT).as_posix()), f"{committed} is not tracked"
+        assert committed.read_bytes() == live.read_bytes(), (
+            f"docs/skills/{name}/SKILL.md differs from the live skill {live}; copy the live skill into the repository")
 
 
 def test_docs_and_skills_state_the_gate_rule_contract_and_no_retired_phrase():
@@ -97,17 +120,17 @@ def test_docs_and_skills_state_the_gate_rule_contract_and_no_retired_phrase():
 
 
 def test_skills_run_venv2_state_4_3_3_the_two_stage_contract_statuses_and_exit_codes():
-    present = {k: v for k, v in SKILLS.items() if v.is_file()}
-    if not present:
-        pytest.skip("the lab skills live outside the repository; absent in this checkout")
-    for name, path in present.items():
+    for path in list(live_skills().values()) + list(COMMITTED.values()):
         text = " ".join(path.read_text(encoding="utf-8").split())
         for needed in ("E:/rmaps_venv2/Scripts/python.exe", "4.3.3", "--gate-rule", "`complete` (exit 0)",
-                       "`INCOMPLETE` (exit 4)", "`complete_partial` (exit 0)", "(exit 3)", "`failed` (exit 1)"):
-            assert needed in text, (name, needed)
-    full = " ".join(SKILLS["rmaps3-full"].read_text(encoding="utf-8").split()) if "rmaps3-full" in present else ""
-    if full:
+                       "`INCOMPLETE` (exit 4)", "`complete_partial` (exit 0)", "(exit 3)", "`failed` (exit 1)",
+                       '--arm-label "<title>"', "arm_labels_dissertation.tsv"):
+            assert needed in text, (str(path), needed)
+    for path in (SKILLS["rmaps3-full"], COMMITTED["rmaps3-full"]):
+        full = " ".join(path.read_text(encoding="utf-8").split())
         assert TWO_STAGE_CLAUSE in full and "super-uniform at every α" in full
+    for path in (SKILLS["rmaps3-quick"], COMMITTED["rmaps3-quick"]):
+        assert "rmaps3_skill_run.py --verify <OUT_DIR>" in " ".join(path.read_text(encoding="utf-8").split())
 
 
 def test_two_stage_note_calls_tied_permutation_p_conservative_not_uniform():
