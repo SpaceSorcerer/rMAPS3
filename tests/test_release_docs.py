@@ -68,3 +68,50 @@ def test_consolidation_report_states_the_test_count_pytest_collects_at_head():
     collected = re.search(r"(\d+) tests? collected", proc.stdout)
     assert collected, proc.stdout[-2000:] + proc.stderr[-2000:]
     assert int(stated.group(1)) == int(collected.group(1))
+
+
+# ------------------------------------------------------------------ v1.0.1c: skills and docs match the wrapper
+SKILLS = {name: Path.home() / ".claude" / "skills" / name / "SKILL.md" for name in ("rmaps3-quick", "rmaps3-full")}
+GATE_SENTENCE = ("The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the "
+                 "arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer.")
+TWO_STAGE_CLAUSE = "reports its stage-2 p only when its own stage-1 p"
+RETIRED_PHRASES = (
+    "arm-name suffix", "arm suffix", "text after the last `_`", "<name>_<rule>", "needs an arm named",
+    "hard-codes the reli_v121", "is also promoted when any of its motifs", "exactly valid for p",
+    "exact only at or below", "e:/rmaps_venv/", "e:\rmaps_venv\\", "group-triggered promotion is used",
+)
+
+
+def lab_docs():
+    docs = {"README.md": ROOT / "README.md", "tools/README.md": ROOT / "tools" / "README.md"}
+    docs.update({k: v for k, v in SKILLS.items() if v.is_file()})
+    return {k: v.read_text(encoding="utf-8").replace("\r\n", "\n") for k, v in docs.items()}
+
+
+def test_docs_and_skills_state_the_gate_rule_contract_and_no_retired_phrase():
+    for name, text in lab_docs().items():
+        assert GATE_SENTENCE in " ".join(text.split()), name
+        low = text.lower()
+        hits = [p for p in RETIRED_PHRASES if p in low]
+        assert not hits, f"{name} still says {hits}"
+
+
+def test_skills_run_venv2_state_4_3_3_the_two_stage_contract_statuses_and_exit_codes():
+    present = {k: v for k, v in SKILLS.items() if v.is_file()}
+    if not present:
+        pytest.skip("the lab skills live outside the repository; absent in this checkout")
+    for name, path in present.items():
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for needed in ("E:/rmaps_venv2/Scripts/python.exe", "4.3.3", "--gate-rule", "`complete` (exit 0)",
+                       "`INCOMPLETE` (exit 4)", "`complete_partial` (exit 0)", "(exit 3)", "`failed` (exit 1)"):
+            assert needed in text, (name, needed)
+    full = " ".join(SKILLS["rmaps3-full"].read_text(encoding="utf-8").split()) if "rmaps3-full" in present else ""
+    if full:
+        assert TWO_STAGE_CLAUSE in full and "super-uniform at every α" in full
+
+
+def test_two_stage_note_calls_tied_permutation_p_conservative_not_uniform():
+    text = (ROOT / "docs" / "two_stage_validity.md").read_text(encoding="utf-8")
+    assert "conservative (super-uniform), not uniform" in text
+    assert "is then uniform, with ties counted against it" not in text
+    assert TWO_STAGE_CLAUSE in text

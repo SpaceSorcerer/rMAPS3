@@ -15,7 +15,7 @@ Status key:
 
 | Tool | Purpose | Layer | Status |
 |---|---|---|---|
-| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.3 figures | wrapper | CANONICAL |
+| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.3 figures. Status `complete` needs every path of `REQUIRED_ARTIFACTS[mode][engine][stat]` present, non-empty and sha256-hashed in `run_manifest.json` | wrapper | CANONICAL |
 | `build_event_sets.py` | Portable stdlib Rule-A pre-split builder, with eight-column coordinates and a gate ledger | inputs | CANONICAL (portable) |
 | `build_event_sets_lab_full.py` | The pandas lab builder behind the lab event sets: rule A, frozen rule B, and `--vast-conf effect-only` for ruleBeffect. Needs `requirements-lab-full.txt` | inputs | CANONICAL (lab) |
 | `countdist_to_npz.py` | Packs a released run's `temp/*.countDist.*.txt` into per-motif `*.counts.npz` archives | main layer | CANONICAL |
@@ -23,7 +23,7 @@ Status key:
 | `rmaps_countdist_io.py` | Shared readers and the released rank-sum kernel | library | CANONICAL |
 | `calibrate_ranksum_v2.py` | Calibration v2.1, which gives the p and q to report: target-exon cluster permutation, two stages, RBP-level min-P, and the unique-k-mer family | supplement | CANONICAL |
 | `rmaps_calib_v2_lib.py` | Cluster drawer, RBP min-P / max-z / mean-z and k-mer grouping for v2 | library | CANONICAL |
-| `build_region_lollipops_v4.py` | Region lollipops, figure version 4.3.3: both layers, by-RBP and by-motif, main and `_noSpliceosome_noBroad` | figures | CANONICAL |
+| `build_region_lollipops_v4.py` | Region lollipops, figure version 4.3.3: both layers, by-RBP and by-motif, main and `_noSpliceosome_noBroad`. `--gate-rule [ARM=]RULE` per arm, or the `rule` of its `--counts-json` record | figures | CANONICAL |
 | `rank_stability.py` | Foreground-bootstrap stability of the RBP order on an audited Fisher run (`positional/*.hits.npz`) | stability | CANONICAL |
 | `calibrate_ranksum.py` | v1 row-unit calibration. It writes the `*_rowunit` sensitivity columns, and v2 imports its `MotifModel` | supplement | SUPERSEDED by `calibrate_ranksum_v2.py`; SENSITIVITY only |
 | `unit_sensitivity.py` | Row versus target-exon unit comparison. A is the row unit, B deduplicates to one row per target exon, C keeps rows and permutes clusters | sensitivity | SENSITIVITY |
@@ -34,6 +34,8 @@ Status key:
 | `summarize_rmaps_regions.py` | Portable Fisher regional-minima summarizer for the audited engine, from the 2026-09-16 layer | Fisher layer | SUPERSEDED by `calibrate_ranksum_v2.py` |
 | `summarize_rmaps_regions_lab_v5.py` | Lab v5 Fisher summarizer with two-stage refinement. `rank_stability.py` imports its readers | Fisher layer | SUPERSEDED by `calibrate_ranksum_v2.py` |
 | `rmaps3_lab_run.py` | Config-driven audited-engine Fisher wrapper. `rmaps3_skill_run.py` imports its coordinate normalisation | wrapper | SUPERSEDED by `rmaps3_skill_run.py` |
+
+The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer. The figure builder follows the same rule and refuses an arm whose footer needs a rule and has none.
 
 ## Order for one arm (what `rmaps3_skill_run.py --mode full` runs)
 

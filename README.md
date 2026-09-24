@@ -175,8 +175,11 @@ and `tools/rmaps3_lab_run.py` remain for reproduction.
 (CANONICAL / SENSITIVITY / SUPERSEDED). Two lab skills wrap
 [`tools/rmaps3_skill_run.py`](tools/rmaps3_skill_run.py):
 
-- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`. A run that lacks the verified archives, or the figures when `--no-figures` was not given, exits 4 with status `INCOMPLETE` in `run_manifest.json`; `--allow-partial` records it as `complete_partial` and exits 0.
+- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`.
 - **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.3 figures of both layers and the rank workbook.
+- **Completeness.** A run is `complete` (exit 0) only when every artefact its mode, engine and statistic require (`REQUIRED_ARTIFACTS` in the wrapper) exists, is non-empty and has its sha256 in `run_manifest.json`; otherwise it is `INCOMPLETE` (exit 4), or `complete_partial` (exit 0) with `--allow-partial`. A failed positive control gives `complete_with_failed_positive_control` (exit 3), an exception `failed` (exit 1), a refused argument exit 2 before any output exists. Every required path is listed once, in the wrapper's `REQUIRED_ARTIFACTS[mode][engine][stat]`; per-motif archives expand over every motif of the root tables, so a partial conversion is `INCOMPLETE`.
+- **Gate rule.** The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer. Pre-split input without either is refused.
+- **Two stages.** Each test reports its stage-2 p only when its own stage-1 p ≤ `--refine-threshold` (0.005), and its stage-1 p otherwise, so every calibrated p is super-uniform at every α and BH over them controls the FDR under PRDS (`docs/two_stage_validity.md`).
 
 The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
 GENCODE GTF and the two exclusion lists explicitly. The skills hold the lab's values.
@@ -200,7 +203,7 @@ Then, from the repository root, with pre-split inputs and their gate record:
 
 ```bash
 python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO_B \
-  --up up.coord.txt --dn dn.coord.txt --bg bg.coord.txt --gate-counts counts.json \
+  --up up.coord.txt --dn dn.coord.txt --bg bg.coord.txt --gate-counts counts.json --gate-rule B \
   --genome-root genomedata --genome hg38 \
   --engine released --engine-root ../rMAPS3_upstream --stat-method mannwhitney \
   --permutations 2000 --refine-perms 100000 --seed 149 \
@@ -211,10 +214,9 @@ python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO
 
 `--rmats-se SE.MATS.JC.txt --filter gates.json` replaces the three set flags and
 `--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`, which implements
-rule A only, so raw input needs an arm named `<NAME>_A`. The wrapper refuses raw input for an arm
-whose suffix names rule B or Beffect: rule B sets are frozen concordant files, supplied pre-split.
-`--gate-rule` states the rule explicitly and must equal the arm suffix. The output root must be
-absent or empty.
+rule A only, so raw input is rule A under any arm name and `--gate-rule B` or `Beffect` with raw
+input is refused: rule B sets are frozen concordant files, supplied pre-split. The output root must
+be absent or empty.
 
 The same chain, step by step, reads and writes explicit roots:
 
@@ -223,7 +225,7 @@ python tools/countdist_to_npz.py --arm QKI_KO_B --released-root runs --out-root 
 python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root runs --counts-root counts
 python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary_rowunit --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --permutation-unit row --seed 149
 python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --rowunit-root summary_rowunit --seed 149
-python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --event-sets-root event_sets --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
+python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --event-sets-root event_sets --gate-rule QKI_KO_B=B --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
 ```
 
 Here `runs/QKI_KO_B/` is the released engine's output directory, run with `--keep-temp`.

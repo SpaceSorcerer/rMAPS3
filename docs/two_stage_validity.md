@@ -2,7 +2,7 @@
 
 **Rule (self-triggered promotion).** Each reported test reports its stage-2 p only when its own stage-1 p <= t (`--refine-threshold`, default 0.005); otherwise it reports its stage-1 p. The tests are the motif-level test per sub-region and per pooled region, and RBP min-P, max-z and mean-z per pooled region. Stage-2 draws computed because another test of the same pair or RBP was promoted never switch a test. `calib_stage`, `calib_perms_used` and `rbp_calib_stage[_maxz|_meanz]`, `rbp_calib_perms_used[_maxz|_meanz]` say which stage each p comes from. Code: `tools/rmaps_calib_v2_lib.py` `two_stage_p`.
 
-**Each stage p is super-uniform.** p_k = (b_k+1)/(B_k+1) = (b+1)/(B+1) with b_k = #{draws with statistic >= observed}. Under the null the observed labelling and the B_k random cluster draws are exchangeable. The observed statistic's rank among the B_k + 1 values is then uniform, with ties counted against it, so P(p_k <= a) <= a for every a.
+**Each stage p is super-uniform.** p_k = (b_k+1)/(B_k+1) = (b+1)/(B+1) with b_k = #{draws with statistic >= observed}. Under the null the observed labelling and the B_k random cluster draws are exchangeable. Without ties the observed statistic's rank among the B_k + 1 values is uniform. Ties are counted against the observed value, which can only raise b_k, so p_k is conservative (super-uniform), not uniform: P(p_k <= a) <= a for every a.
 
 **The switched p.** Let p = p2 if p1 <= t, else p1.
 - a <= t: {p <= a} = {p1 <= t, p2 <= a}, so P(p <= a) <= P(p2 <= a) <= a.
