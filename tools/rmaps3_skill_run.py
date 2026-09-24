@@ -751,16 +751,13 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     log(f"wrote {score_table} ({n_rows} rows; released-layer motif scores, no calibrated columns)")
     plt.rcParams.update({"font.family": "Arial", "svg.fonttype": "none",
                          "svg.hashsalt": "rmaps-v4", "pdf.fonttype": 42})
-    if args.arm_label:
-        lol.LABELS[arm] = args.arm_label
-    lol.LABELS.setdefault(arm, arm.replace("_", " "))
     mappings, naming_rows, naming_stats = lol.load_naming(
         known, additional or lol.ESRP_TABLE, args.gtf, args.alias_table)
     aliases = naming_stats["alias_mappings"]
     lists = {"spliceosome_census": lol.load_exclusion_list(args.spliceosome_list),
              "broad_binders": lol.load_exclusion_list(args.broad_binders_list)}
     lists = {k: {aliases.get(s, s) for s in v} for k, v in lists.items()}
-    counts, _ = lol.gate_counts(None, arm, None, out / "event_counts.json")
+    counts, _ = lol.gate_counts(arm, out / "event_counts.json")
     engine_root = engine_root_of(args)
     commit = git_revision(engine_root)[:7]
     texts = lol.resolve_texts(args)
@@ -1132,11 +1129,21 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
             "writes; pass --rank-stability-run <audited engine dir> to include it")
 
     figures = out / "figures"
+    run_step("figures_v" + figure_version(), figure_command(args, out, engine_out, summary_root), log, env, ROOT, out)
+    produced.append(("Region lollipops, figure version " + figure_version(),
+                     [("figure index", figures / "index.html"),
+                      ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
+    return produced
+
+
+def figure_command(args, out: Path, engine_out: Path, summary_root: Path) -> list:
+    """The full-mode figure builder call: every title, rule, control and text is passed explicitly."""
     command = [sys.executable, str(ROOT / "tools" / "build_region_lollipops_v4.py"),
-               "--arms", args.arm, "--out-root", str(figures),
+               "--arms", args.arm, "--out-root", str(out / "figures"),
                "--released-root", str(engine_out.parent),
                "--calibrated-root", str(summary_root),
                "--counts-json", f"{args.arm}={out / 'event_counts.json'}",
+               "--arm-label", f"{args.arm}={args.arm_label}",
                "--alias-table", str(args.alias_table), "--gtf", str(args.gtf),
                "--spliceosome-list", str(args.spliceosome_list),
                "--broad-binders-list", str(args.broad_binders_list),
@@ -1145,6 +1152,9 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                "--released-stat-method", args.stat_method,
                "--top-n", str(args.top_n)]
     command += ["--gate-rule", check_gate_rule(args, bool(args.rmats_se))[0]]
+    if args.positive_control:
+        command += ["--positive-control", args.positive_control,
+                    "--positive-control-panels", args.positive_control_panels]
     if args.arm in set(args.underpowered_arms):
         command += ["--underpowered-arms", args.arm]
     if args.method_comparison:
@@ -1153,11 +1163,7 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                         ("--direction-text", args.direction_text), ("--tail-text", args.tail_text)):
         if value:
             command += [flag, str(value)]
-    run_step("figures_v" + figure_version(), command, log, env, ROOT, out)
-    produced.append(("Region lollipops, figure version " + figure_version(),
-                     [("figure index", figures / "index.html"),
-                      ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
-    return produced
+    return command
 
 
 # ------------------------------------------------------------------ main
@@ -1215,7 +1221,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-partial", action="store_true",
                    help="exit 0 with status complete_partial when the verified count archives or the promised "
                         "figures are missing; without it such a run exits 4 with status INCOMPLETE")
-    p.add_argument("--arm-label", default=None, help="figure title for an arm the builder does not name")
+    p.add_argument("--arm-label", default=None,
+                   help="figure and index title; required whenever figures are drawn. Never derived from the arm "
+                        "name; the dissertation arms' titles are in data/arm_labels_dissertation.tsv")
     # full mode
     p.add_argument("--calib-unit", choices=("cluster",), default="cluster",
                    help="permutation unit of the reportable calibration: the target-exon cluster; the "
@@ -1273,6 +1281,9 @@ def validate(args) -> None:
     if args.gate_counts and not presplit:
         raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
     check_gate_rule(args, from_rmats)
+    if draws and not (args.arm_label or "").strip():
+        raise ValueError("figures need a title: pass --arm-label <title> (the dissertation arms' titles are in "
+                         "data/arm_labels_dissertation.tsv) or --no-figures; the arm name is never read as a title")
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
                 "refine_perms", "bootstraps", "top_n"):
         if getattr(args, key) < 1:

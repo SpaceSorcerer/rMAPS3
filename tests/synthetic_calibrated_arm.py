@@ -108,5 +108,6 @@ def draw(arm_inputs, figures: Path, extra=()):
               "--calibrated-root", str(arm_inputs["calibrated"]), "--counts-json", f"{ARM}={arm_inputs['counts_json']}",
               "--alias-table", str(ALIAS), "--gtf", str(arm_inputs["gtf"]),
               "--spliceosome-list", str(arm_inputs["splice"]), "--broad-binders-list", str(arm_inputs["broad"]),
-              "--released-commit", COMMIT, "--gate-rule", f"{ARM}=A", *extra])
+              "--released-commit", COMMIT, "--gate-rule", f"{ARM}=A", "--arm-label", f"{ARM}=QKI knockout test arm",
+              "--positive-control", "QKI", *extra])
     return figures

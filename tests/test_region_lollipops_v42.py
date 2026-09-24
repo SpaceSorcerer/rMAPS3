@@ -83,7 +83,7 @@ def test_single_layer_main_draws_the_released_layer_with_overridden_text(tmp_pat
     (scores_only / "QKI_KO_T" / "command.log").write_text("scores\nexit=0\n", encoding="utf-8")
     lol.main(["--arms", "QKI_KO_T", "--out-root", str(figures), "--released-root", str(engine.parent),
               "--calibrated-root", str(scores_only),
-              "--counts-json", f"QKI_KO_T={out / 'event_counts.json'}",
+              "--counts-json", f"QKI_KO_T={out / 'event_counts.json'}", "--arm-label", "QKI_KO_T=QKI knockout test arm",
               "--gtf", str(gtf), "--spliceosome-list", str(tmp_path / "splice.txt"),
               "--broad-binders-list", str(tmp_path / "broad.txt"),
               "--released-commit", skill.git_revision(ROOT)[:7],

@@ -209,8 +209,12 @@ python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO
   --permutations 2000 --refine-perms 100000 --seed 149 \
   --gtf gencode.v49.primary_assembly.annotation.gtf \
   --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt \
-  --positive-control QKI
+  --positive-control QKI --arm-label "QKI knockout (rMATS ∩ VAST-tools concordant events)"
 ```
+
+`--arm-label` is the figure and index title and is required whenever figures are drawn; it is never
+derived from the arm name. The titles of the seven dissertation arms are in
+`data/arm_labels_dissertation.tsv`.
 
 `--rmats-se SE.MATS.JC.txt --filter gates.json` replaces the three set flags and
 `--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`, which implements
@@ -225,7 +229,7 @@ python tools/countdist_to_npz.py --arm QKI_KO_B --released-root runs --out-root 
 python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root runs --counts-root counts
 python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary_rowunit --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --permutation-unit row --seed 149
 python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --rowunit-root summary_rowunit --seed 149
-python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --event-sets-root event_sets --gate-rule QKI_KO_B=B --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
+python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --counts-json QKI_KO_B=counts.json --gate-rule QKI_KO_B=B --arm-label "QKI_KO_B=QKI knockout (rMATS ∩ VAST-tools concordant events)" --positive-control QKI --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
 ```
 
 Here `runs/QKI_KO_B/` is the released engine's output directory, run with `--keep-temp`.
@@ -234,7 +238,7 @@ Checks to read before trusting a run:
 
 - `counts/<ARM>/VERIFY.md` shows that the archives reproduce every root-table value and every per-position value by exact float equality. Any mismatch, missing table or changed countDist file aborts the run and deletes nothing.
 - `summary/<ARM>/refinement_report.json` gives the stage record, the BH family sizes, and the events and target exons per set.
-- `figures/positive_control_audit.tsv` checks, on a QKI-KO arm, that QKI ranks first in INCLUDED × Upstream Intron and SKIPPED × Downstream Intron.
+- `figures/positive_control_audit.tsv`, written when `--positive-control` is given (QKI for a QKI-KO arm), checks that the symbol ranks first in INCLUDED × Upstream Intron and SKIPPED × Downstream Intron. The builder takes the gate record by its path (`--counts-json ARM=PATH`), the title from `--arm-label` and the control from `--positive-control`; nothing is read from the arm name.
 
 ### Pre-split input format
 

@@ -25,7 +25,8 @@ COUNTS = {"n_up": 1, "n_dn": 1, "n_bg": 1, "n_expr_unknown_in_fg": 0, "n_expr_un
 
 
 def args(arm, *extra):
-    return skill.build_parser().parse_args(["--mode", "quick", "--arm", arm, "--out", "o", *extra])
+    return skill.build_parser().parse_args(["--mode", "quick", "--arm", arm, "--out", "o", "--arm-label", "test arm",
+                                            *extra])
 
 
 def record(tmp_path, rule):
@@ -100,8 +101,8 @@ def test_builder_rule_from_flag_or_counts_record(tmp_path):
         lol.arm_gate_rule("QKI_KO_A", "A", str(path))
     path.write_text(json.dumps(COUNTS), encoding="utf-8")
     assert lol.arm_gate_rule("QKI_KO_B", None, str(path)) is None
-    with pytest.raises(ValueError, match="lab gate tree is keyed by rule"):
-        lol.gate_counts(str(tmp_path), "QKI_KO_B", "persample10_bm50_bgfdr0.5", None, None)
+    with pytest.raises(ValueError, match="pass --counts-json QKI_KO_B=<path>"):
+        lol.gate_counts("QKI_KO_B", None)
 
 
 def test_builder_gate_rule_flag_is_per_arm(capsys):

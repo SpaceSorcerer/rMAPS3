@@ -417,7 +417,7 @@ def test_full_mode_refuses_the_audited_engine(tmp_path):
 
 # ------------------------------------------------------------------ quick-mode figures
 FIG_ARGS = ("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o", "--up", "u", "--dn", "d",
-            "--bg", "b")
+            "--bg", "b", "--arm-label", "QKI knockout test arm")
 
 
 def test_presplit_input_needs_a_stated_rule_and_figures_need_a_gate_record():
@@ -548,7 +548,7 @@ def build_fork_figures(tmp_path):
                  "--engine-root", str(ROOT), "--gtf", str(gtf),
                  "--spliceosome-list", str(tmp_path / "splice.txt"),
                  "--broad-binders-list", str(tmp_path / "broad.txt"),
-                 "--positive-control", "QKI")
+                 "--positive-control", "QKI", "--arm-label", "QKI knockout test arm")
     scores = {m: skill.motif_scores(counts_root, args.arm, m) for m in motifs}
     result = skill.build_quick_figures(args, out, engine, roots, motifs, scores, alias,
                                        ROOT / "data" / "knownMotifs.human.mouse.txt",

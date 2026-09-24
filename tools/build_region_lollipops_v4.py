@@ -46,13 +46,6 @@ from scipy.stats import rankdata
 
 REGIONS = ['Upstream Intron', 'Exon Body', 'Downstream Intron']
 DIRECTIONS = ['INCLUDED', 'SKIPPED']
-LABELS = {'MIAT_KD_A': 'MIAT knockdown (rMATS events)',
-          'MIAT_KD_B': 'MIAT knockdown (rMATS ∩ VAST-tools concordant events)',
-          'MIAT_KD_Beffect': 'MIAT knockdown (rMATS ∩ VAST-tools concordant, relaxed rule)',
-          'MIAT_OE_A': 'MIAT overexpression (rMATS events)',
-          'QKI_KO_A': 'QKI knockout (rMATS events)',
-          'QKI_KO_B': 'QKI knockout (rMATS ∩ VAST-tools concordant events)',
-          'QKI_KO_Beffect': 'QKI knockout (rMATS ∩ VAST-tools concordant, relaxed rule)'}
 COLORS = ['#0072B2', '#56B4E9', '#999999', '#DDDDDD']
 LAYERS = ['released_ranksum_rawP', 'calibrated_ranksum']
 LAYER_TITLES = {'released_ranksum_rawP': "MAIN — authors' rMAPS3 rank-sum, raw p",
@@ -71,7 +64,6 @@ RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
 SCORE_FIELDS = ['fg_mean_count', 'bg_mean_count', 'count_ratio', 'fg_proportion', 'bg_proportion',
                 'enrichment_ratio']
-QKI_MAP_NAME = 'SE.QKI-ACTAAC_ACG_.png'
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NAMING_TABLE = REPO_ROOT / 'data' / 'knownMotifs.human.mouse.txt'
 ESRP_TABLE = REPO_ROOT / 'data' / 'ESRP.like.motif.txt'
@@ -244,36 +236,14 @@ def exclusion_audit(arm, entries, lists):
     return audits, dropped
 
 
-def gate_counts(event_sets_root, arm, gate, counts_json=None, rule=None):
-    """Event counts for one arm: an explicit counts.json, or the lab gate tree <arm>/<gate>_rule<rule>/ (the rule is
-    given, never read from the arm name)."""
-    if counts_json:
-        path = Path(counts_json)
-        source = json.loads(path.read_text())
-        counts = {k: int(source[k]) for k in
-                  ['n_up', 'n_dn', 'n_bg', 'n_expr_unknown_in_fg', 'n_expr_unknown_in_bg']}
-        return counts, path
-    if event_sets_root is None:
-        raise ValueError(f'Need --counts-json {arm}=<path> or --event-sets-root')
-    if gate != 'persample10_bm50_bgfdr0.5':
-        raise ValueError('the lab gate tree layout requires persample10_bm50_bgfdr0.5')
-    if rule is None:
-        raise ValueError(f'the lab gate tree is keyed by rule: pass --gate-rule {arm}=<A|B|Beffect>; the arm name '
-                         'is never read as a rule')
-    base = arm[:-len('_' + rule)] if arm.endswith('_' + rule) else arm
-    path = Path(event_sets_root) / base / f'{gate}_rule{rule}' / 'counts.json'
-    source = json.loads(path.read_text())
+def gate_counts(arm, counts_json):
+    """Event counts for one arm from its gate record, named by an explicit path (--counts-json ARM=PATH). No storage
+    path is ever derived from the arm name."""
+    if not counts_json:
+        raise ValueError(f'no gate record for {arm}: pass --counts-json {arm}=<path>')
+    path = Path(counts_json)
+    source = json.loads(path.read_text(encoding='utf-8-sig'))
     counts = {k: int(source[k]) for k in ['n_up', 'n_dn', 'n_bg', 'n_expr_unknown_in_fg', 'n_expr_unknown_in_bg']}
-    sensitivity = Path(event_sets_root) / 'gate_sensitivity.tsv'
-    if not sensitivity.is_file():
-        return counts, path
-    rows = [r for r in read_tsv(sensitivity)
-            if r['arm'] == base and r['coverage'] == 'persample10' and r['floor'] == 'bm50'
-            and float(r['bg_fdr']) == .5 and r['rule'] == rule]
-    if len(rows) > 1 or (not rows and rule != 'Beffect'):
-        raise ValueError(f'Expected one gate_sensitivity row for {arm}; found {len(rows)}')
-    if rows and any(int(rows[0][k]) != v for k, v in counts.items()):
-        raise ValueError(f'Gate count sources disagree for {arm}')
     return counts, path
 
 
@@ -565,7 +535,8 @@ def resolve_texts(args):
              'tail_text_supplement': get('tail_text_supplement') or record.get('tail_text_supplement'),
              'commit': get('released_commit') or RELEASED_COMMIT,
              'stat_method': get('released_stat_method') or get('stat_method') or STAT_METHOD,
-             'rule': get('gate_rule')}
+             'rule': get('gate_rule'),
+             'arm_label': get('arm_label') if isinstance(get('arm_label'), str) else None}
     texts['source'] = ('command line' if any([get('gate_text'), get('direction_text'), get('tail_text'),
                                               get('tail_text_supplement')]) else
                        f'gate record {get("gate_record")}' if record else 'dissertation default')
@@ -1312,11 +1283,37 @@ def draw_break(ax, x, ymax):
                 zorder=2.6, clip_on=False, solid_capstyle='butt')
 
 
+def arm_title(texts, arm):
+    """The figure title: --arm-label, never derived from the arm name."""
+    title = (texts or {}).get('arm_label')
+    if not title:
+        raise ValueError(f'no figure title for arm {arm}: pass --arm-label {arm}=<title>')
+    return title
+
+
+def positive_control_rows(arm, layer, variant, kind, panels, symbol, panel_spec, refinement):
+    """Rank-1 check of --positive-control on the named panels of one drawn figure."""
+    rows = []
+    for panel in panel_spec:
+        drawn = panels.get(panel, [])
+        first = drawn[0] if drawn else None
+        rows.append({'arm': arm, 'layer': layer, 'variant': variant, 'kind': kind,
+                     'statistic': ('raw rank-sum p' if layer == LAYERS[0] else
+                                   f'RBP-level calibrated ({refinement["rbp_level_column"]})'
+                                   if kind == 'byRBP' else 'motif-level calibrated (cluster)'),
+                     'panel': ' × '.join(panel), 'symbol': symbol,
+                     'first': first['_label'] if first else None, 'first_p': first['_p'] if first else None,
+                     'first_q': first['_q'] if first else None,
+                     'pass': first is not None and first['_label'] == symbol})
+    return rows
+
+
 def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size_key, path, args, excluded=False,
                 texts=None, caveat='', target_exons=None, sensitivity='', q_floor=None):
     texts = texts or resolve_texts(args)
+    title = arm_title(texts, arm)
     fig = plt.figure(figsize=(32, 28), dpi=PNG_DPI)
-    fig.text(.5, .978, LABELS[arm] + ' — skipped-exon motif map', ha='center', va='top', fontsize=27, weight='bold')
+    fig.text(.5, .978, title + ' — skipped-exon motif map', ha='center', va='top', fontsize=27, weight='bold')
     entries = [r for rows in panels.values() for r in rows]
     # Underpowered arms carry the calibration summary's own power statement, verbatim, under the title.
     warn = power is not None and not power['adequate']
@@ -1715,7 +1712,8 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
 
 
 # ---------------------------------------------------------------- index
-def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_archive_name=None, texts=None):
+def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_archive_name=None, texts=None,
+                positive_control=None):
     commit, stat_method = engine_of(texts)
     parts = [f'<!doctype html><html lang="en"><meta charset="utf-8">'
              f'<title>rMAPS3 rank-sum motif maps (v{FIG_VERSION})</title>'
@@ -1782,7 +1780,7 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
         arm = rec['arm']
         c = rec['counts']
         te = rec.get('target_exons')
-        parts.append(f'<section><h2>{html.escape(LABELS[arm])}</h2>'
+        parts.append(f'<section><h2>{html.escape(rec["arm_label"])}</h2>'
                      f'<p>Events (rMATS SE rows): included {c["n_up"]:,}; skipped {c["n_dn"]:,}; background '
                      f'{c["n_bg"]:,}' + (f'; over {te["up"]:,} / {te["dn"]:,} / {te["bg"]:,} target exons' if te else '')
                      + '. ' + html.escape(' '.join(rec['gate_lines'])) + '</p>'
@@ -1825,11 +1823,12 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
             parts.append(f'<h3>Authors’ own per-motif RNA maps</h3><p>Unmodified output of the released '
                          f'rMAPS3 run: <a href="{rel}">{html.escape(str(maps_dir))}</a> '
                          f'({len(list(maps_dir.glob("*.png")))} PNG + PDF pairs, one per motif).</p>')
-            # Every arm's run emits all 126 motif maps; only the QKI-KO arms get the QKI map embedded.
-            qki = maps_dir / QKI_MAP_NAME
-            if arm.startswith('QKI_KO') and qki.is_file():
-                parts.append(f'<article style="max-width:900px"><a href="{rel}{QKI_MAP_NAME}">'
-                             f'<img loading="lazy" src="{rel}{QKI_MAP_NAME}" alt="{arm} {QKI_MAP_NAME}"></a>'
+            # Every run emits one map per motif; the maps of the --positive-control symbol are embedded.
+            for png in sorted(maps_dir.glob('*.png')) if positive_control else []:
+                if png.stem.split('.', 1)[-1].split('-', 1)[0].upper() != positive_control.upper():
+                    continue
+                parts.append(f'<article style="max-width:900px"><a href="{rel}{png.name}">'
+                             f'<img loading="lazy" src="{rel}{png.name}" alt="{arm} {png.name}"></a>'
                              '<p>authors’ rMAPS3 per-motif map, unmodified</p></article>')
         parts.append(f'<p><a href="{arm}/{arm}_rank_comparison.xlsx">Rank workbook (.xlsx)</a> · '
                      f'<a href="{arm}/{arm}_rank_comparison_v43.tsv">Ranks TSV</a> · '
@@ -1849,10 +1848,9 @@ def main(argv=None):
     ap.add_argument('--method-comparison', default=None,
                     help='optional method_rank_comparison.tsv from tools/compare_stat_methods.py')
     ap.add_argument('--archive-name', default='_v3.1_archive_2026-09-17')
-    ap.add_argument('--event-sets-root', default=None,
-                    help='lab gate tree; omit and pass --counts-json instead')
     ap.add_argument('--counts-json', action='append', default=[], metavar='ARM=PATH',
-                    help='repeatable; counts.json for one arm, bypassing --event-sets-root')
+                    help='repeatable, one per arm, required: the gate record counts.json of the arm (n_up, n_dn, n_bg, '
+                         'n_expr_unknown_in_fg/bg, optional rule), named by its path; no path is derived from the arm')
     ap.add_argument('--alias-table', default=str(ALIAS_TABLE),
                     help='HGNC alias table: table_name<TAB>hgnc_symbol')
     ap.add_argument('--naming-table', default=str(NAMING_TABLE))
@@ -1866,14 +1864,21 @@ def main(argv=None):
     ap.add_argument('--author-maps-root', default=None,
                     help="root holding <arm>/maps/ from the authors' released run; linked from the index")
     ap.add_argument('--arm-label', action='append', default=[], metavar='ARM=TEXT',
-                    help='repeatable; subtitle label for an arm not in the built-in table')
+                    help='repeatable, one per arm, required: the figure and index title of the arm. The arm name is '
+                         'never read as a title; the dissertation arm titles are in data/arm_labels_dissertation.tsv')
+    ap.add_argument('--positive-control', default=None,
+                    help='HGNC symbol checked for rank 1 on --positive-control-panels of every drawn figure '
+                         '(positive_control_audit.tsv) and whose maps by the authors the index embeds; none by default')
+    ap.add_argument('--positive-control-panels', default='INCLUDED:Upstream Intron,SKIPPED:Downstream Intron',
+                    help='comma-separated DIRECTION:Pooled Region panels for --positive-control')
     ap.add_argument('--underpowered-arms', nargs='*', default=[],
                     help='arms whose figures carry an underpowered banner when the calibration summary '
                          'has no power_label column')
     ap.add_argument('--released-commit', default=RELEASED_COMMIT,
                     help='commit string the released run log must record')
     ap.add_argument('--released-stat-method', default=STAT_METHOD)
-    ap.add_argument('--gate', default='persample10_bm50_bgfdr0.5')
+    ap.add_argument('--gate', default='persample10_bm50_bgfdr0.5',
+                    help='gate name printed in the dissertation-default provenance sentence; a label, never a path')
     ap.add_argument('--top-n', type=int, default=10)
     ap.add_argument('--gate-text', default=None,
                     help='footer gate sentence; up to 3 lines separated by \\n; placeholders {rule}, {n_up}, {n_dn}, '
@@ -1910,19 +1915,20 @@ def main(argv=None):
         args.gate_rules[arm] = rule
     args.gate_rule = None
     args.counts_json = dict(pair.split('=', 1) for pair in args.counts_json)
+    arm_labels = {}
     for pair in args.arm_label:
-        arm, _, text = pair.partition('=')
-        LABELS[arm] = text
-    for arm in args.arms:
-        LABELS.setdefault(arm, arm.replace('_', ' '))
+        arm, sep, text = pair.partition('=')
+        if not sep or arm not in args.arms or not text.strip():
+            ap.error(f'--arm-label {pair}: expected ARM=TITLE with ARM in --arms')
+        arm_labels[arm] = text
+    control_panels = [tuple(part.split(':', 1)) for part in args.positive_control_panels.split(',')]
     texts = resolve_texts(args)
     out = Path(args.out_root)
     out.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({'font.family': 'Arial', 'svg.fonttype': 'none', 'svg.hashsalt': 'rmaps-v4',
                          'pdf.fonttype': 42})
-    unknown = set(args.arms) - set(LABELS)
-    if unknown:
-        raise ValueError(f'Missing arm labels: {sorted(unknown)}')
+    for arm in args.arms:
+        arm_title(dict(arm_label=arm_labels.get(arm)), arm)
     mappings, naming_rows, naming_stats = load_naming(args.naming_table, args.esrp_table, args.gtf, args.alias_table)
     write_tsv(out / 'naming_audit_v43.tsv',
               ['table_name', 'hgnc_symbol', 'source', 'evidence', 'ambiguity_note', 'n_motifs', 'merged_into'],
@@ -1940,13 +1946,11 @@ def main(argv=None):
         dest = out / arm
         dest.mkdir(exist_ok=True)
         texts['rule'] = arm_gate_rule(arm, args.gate_rules.get(arm), args.counts_json.get(arm))
-        counts, countpath = gate_counts(args.event_sets_root, arm, args.gate, args.counts_json.get(arm),
-                                        texts['rule'])
+        texts['arm_label'] = arm_labels[arm]
+        counts, countpath = gate_counts(arm, args.counts_json.get(arm))
         base_sources = [countpath, Path(args.naming_table),
                         Path(args.alias_table), Path(args.esrp_table), Path(args.spliceosome_list),
                         Path(args.broad_binders_list), Path(__file__).resolve()]
-        if args.event_sets_root:
-            base_sources.append(Path(args.event_sets_root) / 'gate_sensitivity.tsv')
         base_sources += [Path(p) for p in args.provenance_source]
         base_sources = [p for p in base_sources if p.is_file()]
         layers, sources, refinement = {}, list(base_sources), None
@@ -2022,16 +2026,9 @@ def main(argv=None):
                 for kind in KINDS:
                     panels = select_panels(chosen, layer, kind, args.top_n)
                     selections[(variant, kind, layer)] = panels
-                    if arm.startswith('QKI_KO'):
-                        for panel in [('INCLUDED', 'Upstream Intron'), ('SKIPPED', 'Downstream Intron')]:
-                            first = panels[panel][0]
-                            controls.append({'arm': arm, 'layer': layer, 'variant': variant, 'kind': kind,
-                                             'statistic': ('raw rank-sum p' if layer == LAYERS[0] else
-                                                           f'RBP-level calibrated ({refinement["rbp_level_column"]})'
-                                                           if kind == 'byRBP' else 'motif-level calibrated (cluster)'),
-                                             'panel': ' × '.join(panel), 'first': first['_label'],
-                                             'first_p': first['_p'], 'first_q': first['_q'],
-                                             'pass': first['_label'] == 'QKI'})
+                    if args.positive_control:
+                        controls += positive_control_rows(arm, layer, variant, kind, panels, args.positive_control,
+                                                          control_panels, refinement)
                     for (d, region), rows in panels.items():
                         for i, r in enumerate(rows, 1):
                             audits.append({'arm': arm, 'layer': layer, 'variant': variant, 'type': kind,
@@ -2198,7 +2195,7 @@ def main(argv=None):
             f'openpyxl\t{openpyxl.__version__}\nnumpy\t{np.__version__}\nPNG_DPI\t{PNG_DPI}\n', encoding='utf-8')
         for layer, s in sorted(scales.items()):
             scale_rows.append({'arm': arm, 'layer': layer, **s})
-        records.append({'arm': arm, 'target_exons': target_exons, 'gate_lines': gate_lines(texts, arm, counts),
+        records.append({'arm': arm, 'arm_label': arm_labels[arm], 'target_exons': target_exons, 'gate_lines': gate_lines(texts, arm, counts),
                         'supplement_text': (f'B = {refinement["stage1_permutations"]:,} permutations, refined to '
                                             f'{refinement["stage2_permutations"]:,} where stage-1 p ≤ '
                                             f'{refinement["refine_threshold"]}. BH divisors actually used: by-motif '
@@ -2209,7 +2206,8 @@ def main(argv=None):
                         'rank_summary': summaries,
                         'scales': scales, 'power': power})
         print(f'OK {arm}: layers={sorted(layers)} figures={len(selections)}', flush=True)
-    write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name, texts)
+    write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name, texts,
+                args.positive_control)
     if controls:
         write_tsv(out / 'positive_control_audit.tsv', list(controls[0]), controls)
     write_tsv(out / 'selection_audit_v43.tsv', list(audits[0]), audits)
