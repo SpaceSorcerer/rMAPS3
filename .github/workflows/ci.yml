@@ -68,3 +68,41 @@ jobs:
         if: steps.motif_fasta.outputs.available != 'true'
         run: |
           echo "Skipping motif CI test: genomedata/hg19/hg19.fa not found."
+
+  lab-fork:
+    # Lab layer of branch lab/miat-qki: pinned environment, tools/ compile check and the pytest suite.
+    # tests/legacy and the hg19 motif script (tests/test_motif.py) need data not in the repository.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Arial for the figure layout audit
+        run: |
+          echo "ttf-mscorefonts-installer msttcorefonts/accept-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get update -q
+          sudo apt-get install -y -q ttf-mscorefonts-installer fontconfig
+          fc-cache -f
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the pinned environment
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+
+      - name: Compile tools
+        run: python -m compileall -q tools
+
+      - name: Test suite
+        env:
+          RMAPS_FORCE_MOTIF_FALLBACK: "1"
+          OMP_NUM_THREADS: "2"
+          OPENBLAS_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+        run: python -m pytest -q tests --ignore=tests/legacy --ignore=tests/test_motif.py

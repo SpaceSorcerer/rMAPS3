@@ -18,3 +18,10 @@ def test_consolidation_report_cited_by_lessons_is_tracked():
     assert cited, "LESSONS.md must cite the consolidation report"
     for path in cited:
         assert tracked(path), f"LESSONS.md cites {path}, which a clone does not contain"
+
+
+def test_ci_runs_the_lab_suite_and_compiles_tools():
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "python -m compileall -q tools" in ci
+    assert "python -m pytest -q tests --ignore=tests/legacy" in ci
+    assert "pip install -r requirements-lock.txt" in ci
