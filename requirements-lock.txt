@@ -1,10 +1,7 @@
 # Pinned environment for the full lab chain of branch lab/miat-qki (rMAPS3 fork), Python 3.11.
-# Generated 2026-09-24 from `pip freeze` of E:\rmaps_venv (Python 3.11.15), which runs the engine,
-# the wrapper, calibration, figures and the test suite, plus pandas and its Windows tzdata from the
-# conda env codex_py (Python 3.11.15), which is the only lab interpreter that has pandas.
-# No single lab interpreter satisfies this whole file: E:\rmaps_venv lacks pandas and PyYAML
-# (needed only by tools/build_event_sets_lab_full.py and YAML filter specs), and codex_py lacks
-# pyfaidx, PyX, pypdfium2, typer, flask and pytest. A fresh venv installed from this file does.
+# Every line below is `pip freeze` of E:\rmaps_venv2, verbatim (2026-09-24): Python 3.11.15 (conda env codex_py
+# base interpreter), `python -m venv E:\rmaps_venv2` then `pip install -r requirements-lock.txt`. That one
+# environment runs the engine, wrapper, calibration, figures, pandas/PyYAML builders and the whole test suite.
 annotated-doc==0.0.5
 blinker==1.9.0
 click==8.5.0
@@ -41,5 +38,5 @@ scipy==1.17.1
 shellingham==1.5.4
 six==1.17.0
 typer==0.27.2
-tzdata==2026.2; sys_platform == "win32"
+tzdata==2026.2
 Werkzeug==3.1.8

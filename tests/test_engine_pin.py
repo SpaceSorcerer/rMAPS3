@@ -104,11 +104,58 @@ def test_reference_hashes_cover_every_given_reference_list_and_gate_input(tmp_pa
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for _, _, digest in hashes)
 
 
-def test_lock_file_pins_every_third_party_import_of_the_chain():
-    lock = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8")
-    pinned = {line.split("==")[0].lower() for line in lock.splitlines() if "==" in line and not line.startswith("#")}
-    for package in ("numpy", "scipy", "pandas", "openpyxl", "matplotlib", "pyfaidx", "pyx", "pypdfium2",
-                    "pillow", "typer", "flask", "pyyaml", "pytest"):
-        assert package in pinned, package
+MODULE_TO_DIST = {"yaml": "pyyaml", "PIL": "pillow"}
+
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def lock_pins():
+    """{canonical distribution: version}; every non-comment line must be an exact name==version pin."""
+    pins = {}
+    for line in (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.\-]*)==([A-Za-z0-9_.+!\-]+)", line.strip())
+        assert match, f"not an exact pin: {line!r}"
+        pins[canonical(match.group(1))] = match.group(2)
+    return pins
+
+
+def chain_imports():
+    """Top-level third-party modules imported by cli.py, rmaps_core/, tools/, webui/ and tests/ (not legacy)."""
+    import ast
+    files = [ROOT / "cli.py"] + [p for d in ("rmaps_core", "tools", "webui", "tests") for p in (ROOT / d).rglob("*.py")
+                                 if "legacy" not in p.relative_to(ROOT).parts]
+    local = {p.stem for p in files} | {"rmaps_core", "webui", "tests", "tools"}
+    found = set()
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import) else
+                     [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
+            found |= {n.split(".")[0] for n in names}
+    return {m for m in found if m not in sys.stdlib_module_names and m not in local}
+
+
+def test_lock_is_an_exact_pin_set_covering_every_third_party_import_of_the_chain():
+    pins = lock_pins()
+    imports = chain_imports()
+    assert {"numpy", "scipy", "pandas", "yaml", "pyfaidx", "typer", "flask"} <= imports   # the scan sees the chain
+    for module in sorted(imports):
+        assert canonical(MODULE_TO_DIST.get(module, module)) in pins, module
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## Environment" in readme and "requirements-lock.txt" in readme
+
+
+def test_every_pinned_distribution_installed_here_is_at_its_pinned_version():
+    import importlib.metadata as metadata
+    drift = {}
+    for name, version in lock_pins().items():
+        try:
+            installed = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+        if installed != version:
+            drift[name] = (installed, version)
+    assert not drift, drift
