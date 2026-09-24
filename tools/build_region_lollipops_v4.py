@@ -69,6 +69,13 @@ NAMING_TABLE = REPO_ROOT / 'data' / 'knownMotifs.human.mouse.txt'
 ESRP_TABLE = REPO_ROOT / 'data' / 'ESRP.like.motif.txt'
 ALIAS_TABLE = REPO_ROOT / 'data' / 'rbp_alias_hgnc_2026-09-17.tsv'
 _DIGEST_CACHE = {}
+WRITTEN = []  # every path a writer of this module wrote, in order; main() lists exactly these in its manifest
+
+
+def wrote(path):
+    """Register a written file (tools/rmaps_artifacts.py contract); returns the path."""
+    WRITTEN.append(Path(path).resolve())
+    return path
 
 
 def digest(p, algo='md5'):
@@ -93,6 +100,7 @@ def write_tsv(path, fields, rows):
         w = csv.DictWriter(f, fieldnames=fields, delimiter='\t', lineterminator='\n')
         w.writeheader()
         w.writerows({k: ('NA' if v is None else v) for k, v in r.items()} for r in rows)
+    wrote(path)
 
 
 def rbp_label(row):
@@ -1445,13 +1453,13 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
                    'n_stems_truncated': len(truncated_rows), 'truncated_stems': truncated_rows,
                    'colour_floor': depth_floor, 'dot_colours': colour_rows,
                    'colour_audit_pass': all(row['pass'] for row in colour_rows)})
-    fig.savefig(str(path) + '.svg', metadata={'Date': None})
-    fig.savefig(str(path) + '.png', dpi=PNG_DPI)
+    fig.savefig(wrote(str(path) + '.svg'), metadata={'Date': None})
+    fig.savefig(wrote(str(path) + '.png'), dpi=PNG_DPI)
     plt.close(fig)
     if not report['colour_audit_pass']:
         raise ValueError(f'Colour audit failed: {path}')
     if not report['pass']:
-        Path(str(path) + '_layout_failure.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        wrote(Path(str(path) + '_layout_failure.json')).write_text(json.dumps(report, indent=2), encoding='utf-8')
         raise ValueError(f'Layout audit failed: {path}; see _layout_failure.json')
     return report
 
@@ -1707,7 +1715,7 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
     for row in sheet.iter_rows(min_row=2):
         row[1].alignment = Alignment(wrap_text=True, vertical='top')
         sheet.row_dimensions[row[0].row].height = 58
-    book.save(dest / f'{arm}_rank_comparison.xlsx')
+    book.save(wrote(dest / f'{arm}_rank_comparison.xlsx'))
     return summaries, universe_notes, bool(method_rows)
 
 
@@ -1833,7 +1841,7 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
         parts.append(f'<p><a href="{arm}/{arm}_rank_comparison.xlsx">Rank workbook (.xlsx)</a> · '
                      f'<a href="{arm}/{arm}_rank_comparison_v43.tsv">Ranks TSV</a> · '
                      f'<a href="{arm}/{arm}_figure_provenance_v43.md">Provenance sidecar</a></p></section>')
-    (out / 'index.html').write_text('\n'.join(parts + ['</html>']), encoding='utf-8')
+    wrote(out / 'index.html').write_text('\n'.join(parts + ['</html>']), encoding='utf-8')
 
 
 # ---------------------------------------------------------------- main
@@ -1925,6 +1933,7 @@ def main(argv=None):
     texts = resolve_texts(args)
     out = Path(args.out_root)
     out.mkdir(parents=True, exist_ok=True)
+    WRITTEN.clear()
     plt.rcParams.update({'font.family': 'Arial', 'svg.fonttype': 'none', 'svg.hashsalt': 'rmaps-v4',
                          'pdf.fonttype': 42})
     for arm in args.arms:
@@ -1933,7 +1942,7 @@ def main(argv=None):
     write_tsv(out / 'naming_audit_v43.tsv',
               ['table_name', 'hgnc_symbol', 'source', 'evidence', 'ambiguity_note', 'n_motifs', 'merged_into'],
               naming_rows)
-    (out / 'naming_report_v43.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
+    wrote(out / 'naming_report_v43.json').write_text(json.dumps(naming_stats, indent=2) + '\n', encoding='utf-8')
     lists = {'spliceosome_census': load_exclusion_list(args.spliceosome_list),
              'broad_binders': load_exclusion_list(args.broad_binders_list)}
     aliases = naming_stats['alias_mappings']
@@ -2187,10 +2196,10 @@ def main(argv=None):
                  'out-of-bounds audit.',
                  '- Source SHA256:']
         prov += [f'  - {str(p)}: {digest(p, "sha256")}' for p in sources]
-        (dest / f'{arm}_figure_provenance_v43.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
-        (dest / 'command_v43.log').write_text(
+        wrote(dest / f'{arm}_figure_provenance_v43.md').write_text('\n'.join(prov) + '\n', encoding='utf-8')
+        wrote(dest / 'command_v43.log').write_text(
             ' '.join([sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]) + '\n', encoding='utf-8')
-        (dest / 'versions_v43.txt').write_text(
+        wrote(dest / 'versions_v43.txt').write_text(
             f'Python\t{sys.version.split()[0]}\nmatplotlib\t{matplotlib.__version__}\n'
             f'openpyxl\t{openpyxl.__version__}\nnumpy\t{np.__version__}\nPNG_DPI\t{PNG_DPI}\n', encoding='utf-8')
         for layer, s in sorted(scales.items()):
@@ -2215,11 +2224,11 @@ def main(argv=None):
     write_tsv(out / 'rank_agreement_summary_v43.tsv', ['arm', 'layer1', 'layer2', 'mean_rho', 'mean_top10_overlap',
                                                          'n_panels', 'n_defined_rho_panels'], rank_summary)
     write_tsv(out / 'y_scale_audit_v43.tsv', list(scale_rows[0]), scale_rows)
-    if power_rows:
-        write_tsv(out / 'power_label_audit_v43.tsv', list(power_rows[0]), power_rows)
+    write_tsv(out / 'power_label_audit_v43.tsv', ['arm', 'power_label', 'n_changed_included', 'n_changed_skipped',
+                                                  'adequate', 'drawn_on_figures', 'source'], power_rows)
     write_tsv(out / 'dot_size_audit_v43.tsv', list(size_rows[0]), size_rows)
-    if open_dot_rows:
-        write_tsv(out / 'open_dot_audit_v43.tsv', list(open_dot_rows[0]), open_dot_rows)
+    write_tsv(out / 'open_dot_audit_v43.tsv', ['arm', 'layer', 'variant', 'kind', 'direction', 'pooled_region', 'rank',
+                                               'label', 'motif_key', 'fg_mean_count', 'bg_mean_count'], open_dot_rows)
     write_tsv(out / 'truncation_audit_v43.tsv',
               ['arm', 'layer', 'variant', 'kind', 'shared_ymax', 'direction', 'pooled_region', 'rank', 'label',
                'tick', 'motif_key', 'log10p', 'printed'],
@@ -2227,8 +2236,8 @@ def main(argv=None):
                                    'shared_ymax': 'NA', 'direction': 'NA', 'pooled_region': 'NA', 'rank': 'NA',
                                    'label': 'NA', 'tick': 'NA', 'motif_key': 'NA', 'log10p': 'NA',
                                    'printed': 'no stem exceeded its cap in this build'}])
-    if universe_rows:
-        write_tsv(out / 'rank_universe_notes_v43.tsv', list(universe_rows[0]), universe_rows)
+    write_tsv(out / 'rank_universe_notes_v43.tsv', ['arm', 'direction', 'pooled_region', 'v4_only', 'n_shared'],
+              universe_rows)
     colour_rows = [{'figure': rep['figure'], 'arm': rep['arm'], 'layer': rep['layer'], 'kind': rep['kind'],
                     'excluded': rep['excluded'], **row} for rep in layouts for row in rep['dot_colours']]
     if colour_rows:
@@ -2249,19 +2258,18 @@ def main(argv=None):
         bad = [row for row in contrast if not row['pass']]
         if bad:
             raise ValueError(f'Colour contrast below target on {len(bad)} key-tick pairs')
-    (out / 'layout_report_v43.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
+    wrote(out / 'layout_report_v43.json').write_text(json.dumps(layouts, indent=2), encoding='utf-8')
     for s in skipped:
         manifest_rows.append({'arm': s['arm'], 'rbp_level_column': 'NA', 'layer': s['layer'],
                               'status': 'skipped_input_missing',
                               'file': s['file'], 'bytes': 'NA', 'md5': 'NA'})
     rbp_cols = {rec['arm']: rec['rbp_level_column'] or 'NA' for rec in records}
-    built = {p for rec in records for p in (out / rec['arm']).rglob('*')}
-    built |= {p for p in out.glob('*') if p.is_file()}
-    for p in sorted(built):
+    # exactly the files this run's writers registered, never a directory listing that could pick up stale files
+    for p in sorted(set(WRITTEN)):
         if not p.is_file() or p.name == 'figures_manifest_v43.tsv':
             continue
         layer = next((l for l in LAYERS if l in p.name), 'ALL')
-        arm_name = p.parent.name if p.parent != out else 'ALL'
+        arm_name = p.parent.name if p.parent != out.resolve() else 'ALL'
         manifest_rows.append({'arm': arm_name, 'rbp_level_column': rbp_cols.get(arm_name, 'NA'), 'layer': layer,
                               'status': 'built', 'file': str(p.resolve()), 'bytes': p.stat().st_size,
                               'md5': digest(p)})

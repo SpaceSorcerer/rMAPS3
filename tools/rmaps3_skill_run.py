@@ -16,6 +16,7 @@ is overridable by a flag.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -33,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import rmaps_countdist_io as io  # noqa: E402
 from rmaps3_lab_run import COORD_HEADER, normalize_coordinates  # noqa: E402
+from rmaps_artifacts import ArtifactRegistry  # noqa: E402
 
 # Site paths (genome root, released-engine checkout, GTF, exclusion lists) are arguments with no
 # default: the lab passes them from the rmaps3-quick / rmaps3-full skills. Only repo files default.
@@ -81,6 +83,29 @@ FILTER_ALIASES = {
     "treatment_is": "treatment_is",
     "rule": "rule",
 }
+
+
+# ------------------------------------------------------------------ written-file registry
+# main() opens one ArtifactRegistry per run. Every writer registers what it wrote: files written here directly are
+# recorded by register(); a writer function or a subprocess step is wrapped in captured(), which records every file it
+# creates or rewrites under --out and forgets every file it deletes. run_manifest.json hashes every recorded file, and
+# tests/test_artifact_inventory.py asserts that the recorded set equals REQUIRED_ARTIFACTS for every mode.
+_REGISTRY = None
+
+
+def register(path, writer: str):
+    if _REGISTRY is not None:
+        _REGISTRY.add(path, writer)
+    return path
+
+
+@contextlib.contextmanager
+def captured(writer: str):
+    if _REGISTRY is None:
+        yield
+        return
+    with _REGISTRY.capture(writer):
+        yield
 
 
 # ------------------------------------------------------------------ small helpers
@@ -143,7 +168,7 @@ def fresh_directory(path: Path) -> None:
 class Logger:
     def __init__(self, path: Path):
         self.path = path
-        self.handle = open(path, "a", encoding="utf-8")
+        self.handle = open(register(path, "Logger"), "a", encoding="utf-8")
 
     def __call__(self, message: str) -> None:
         stamped = time.strftime("%Y-%m-%dT%H:%M:%S") + " " + message
@@ -161,7 +186,8 @@ def run_step(name: str, command: list, log: Logger, env: dict, cwd: Path, out: P
     stdout_path = out / "logs" / f"{name}.stdout.log"
     stderr_path = out / "logs" / f"{name}.stderr.log"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(stdout_path, "w", encoding="utf-8") as so, open(stderr_path, "w", encoding="utf-8") as se:
+    with open(register(stdout_path, "run_step"), "w", encoding="utf-8") as so, \
+            open(register(stderr_path, "run_step"), "w", encoding="utf-8") as se, captured("step " + name):
         proc = subprocess.run(command, cwd=str(cwd), env=env, stdout=so, stderr=se)
     wall = time.perf_counter() - started
     log(f"STEP {name}: exit={proc.returncode} wall_s={wall:.1f}")
@@ -197,7 +223,7 @@ def build_event_sets(args, out: Path, log: Logger, env: dict) -> Path:
               "gates": gates}
     if expr_table is not None:
         config["inputs"]["deseq2"] = str(Path(expr_table).resolve())
-    config_path = out / "event_set_config.json"
+    config_path = register(out / "event_set_config.json", "build_event_sets")
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     dest = out / "event_sets"
     run_step("build_event_sets",
@@ -225,7 +251,8 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
         raise ValueError(f"FASTA index absent, so the contigs cannot be checked: {fai}")
     mapped = out / "inputs"
     mapped.mkdir(parents=True, exist_ok=True)
-    paths, counts = normalize_coordinates(sources, fai, mapped)
+    with captured("normalize_coordinates"):
+        paths, counts = normalize_coordinates(sources, fai, mapped)
     for key in ("up", "dn", "bg"):
         renamed = sum(v["count"] for v in counts[key]["renamed"].values())
         log(f"events {key}={counts[key]['n_events']} contigs_renamed={renamed}")
@@ -243,7 +270,8 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
         record.update({k: int(gate[k]) for k in ("n_expr_unknown_in_fg", "n_expr_unknown_in_bg")})
         record["gate_counts_source"] = str(Path(args.gate_counts).resolve())
         log(f"gate record {args.gate_counts}: event counts match the inputs")
-    (out / "event_counts.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    register(out / "event_counts.json", "prepare_inputs").write_text(
+        json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if args.rmats_se:
         built = json.loads((out / "event_sets" / "counts.json").read_text())
         built.setdefault("rule", record["rule"])
@@ -339,7 +367,7 @@ def run_engine(args, paths, out: Path, log: Logger, env: dict):
         if not path.is_file() or path.stat().st_size == 0:
             raise RuntimeError(f"Engine exit was zero but the {direction} root table is missing: {path}")
     # The released-run log shape the lab layers assert on before they will read an arm.
-    (out / "engine" / f"{args.arm}_command.log").write_text(
+    register(out / "engine" / f"{args.arm}_command.log", "run_engine").write_text(
         "set={} engine={} ({} @ {}) stat={} start={}\n".format(
             args.arm, args.engine, engine_root, git_revision(engine_root), args.stat_method,
             datetime.now(timezone.utc).isoformat())
@@ -365,8 +393,9 @@ def convert_and_verify(args, engine_out: Path, out: Path, log: Logger, env: dict
         return None, result
     counts_root = out / "counts"
     import countdist_to_npz
-    rc = countdist_to_npz.main(["--arm", args.arm, "--released-root", str(engine_out.parent),
-                               "--out-root", str(counts_root)])
+    with captured("countdist_to_npz"):
+        rc = countdist_to_npz.main(["--arm", args.arm, "--released-root", str(engine_out.parent),
+                                   "--out-root", str(counts_root)])
     if rc != 0:
         raise RuntimeError("countDist -> npz conversion failed")
     result["converted"] = True
@@ -377,8 +406,9 @@ def convert_and_verify(args, engine_out: Path, out: Path, log: Logger, env: dict
         log("WARN " + result["reason"])
         return counts_root, result
     import verify_ranksum_archives
-    rc = verify_ranksum_archives.main(["--arm", args.arm, "--released-root", str(engine_out.parent),
-                                       "--counts-root", str(counts_root)])
+    with captured("verify_ranksum_archives"):
+        rc = verify_ranksum_archives.main(["--arm", args.arm, "--released-root", str(engine_out.parent),
+                                           "--counts-root", str(counts_root)])
     if rc != 0:
         raise RuntimeError(f"archive verification FAILED; see {counts_root / args.arm / 'VERIFY.md'}")
     result["verified"] = True
@@ -386,9 +416,10 @@ def convert_and_verify(args, engine_out: Path, out: Path, log: Logger, env: dict
     if args.keep_temp:
         result["reason"] = "--keep-temp given; verified temporaries kept"
         return counts_root, result
-    deleted, total = delete_verified_temporaries(
-        counts_root / args.arm / verify_ranksum_archives.MANIFEST_NAME, temp_dir,
-        out / "logs" / "temp_deletion.log")
+    with captured("delete_verified_temporaries"):
+        deleted, total = delete_verified_temporaries(
+            counts_root / args.arm / verify_ranksum_archives.MANIFEST_NAME, temp_dir,
+            out / "logs" / "temp_deletion.log")
     result["deleted_files"], result["deleted_bytes"] = deleted, total
     result["reason"] = f"deleted after verification; inventory in {out / 'logs' / 'temp_deletion.log'}"
     log(f"deleted {deleted} verified temporaries ({total / 1e9:.2f} GB), exactly the verifier's list")
@@ -566,7 +597,7 @@ def write_workbook(path: Path, sheets: dict) -> None:
         for index, column in enumerate(columns, 1):
             sheet.column_dimensions[get_column_letter(index)].width = min(
                 44, max(12, len(str(column)) + 2))
-    book.save(path)
+    book.save(register(path, "write_workbook"))
 
 
 def excel_value(value):
@@ -739,12 +770,13 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     rank-comparison step needs a second layer or a v3.1 archive; nothing in it is modified."""
     import matplotlib.pyplot as plt
     import build_region_lollipops_v4 as lol
+    lol.WRITTEN.clear()
     arm = args.arm
     figures = out / "figures"
     score_root = figures / "motif_scores"
     score_table = score_root / arm / "per_motif_regions.tsv"
-    n_rows = write_score_table(score_table, arm, roots, motifs, scores, alias)
-    (score_root / arm / "command.log").write_text(
+    n_rows = write_score_table(register(score_table, "write_score_table"), arm, roots, motifs, scores, alias)
+    register(score_root / arm / "command.log", "build_quick_figures").write_text(
         f"source=count archives {out / 'counts' / arm} (verified against the root tables)\n"
         f"writer={Path(__file__).resolve()} rows={n_rows} layer=released motif scores only\n"
         "exit=0\n", encoding="utf-8")
@@ -803,7 +835,7 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     lol.write_tsv(figures / "naming_audit.tsv",
                   ["table_name", "hgnc_symbol", "source", "evidence", "ambiguity_note", "n_motifs",
                    "merged_into"], naming_rows)
-    (figures / "layout_report.json").write_text(json.dumps(
+    register(figures / "layout_report.json", "build_quick_figures").write_text(json.dumps(
         {"figure_version": lol.FIG_VERSION, "layer": MAIN_LAYER, "n_motifs": n_motifs,
          "y_scale": scale, "size_key": size_key, "dropped_in_noSpliceosome_noBroad": sorted(dropped),
          "figures": layouts}, indent=2, default=str) + "\n", encoding="utf-8")
@@ -819,26 +851,54 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
             log("figure positive control {} {} {} {}: first={} -> {}".format(
                 row["symbol"], row["variant"], row["kind"], row["panel"], row["first"],
                 "PASS" if row["pass"] else "FAIL"))
+    for path in lol.WRITTEN:
+        register(path, "build_region_lollipops_v4")
     log(f"figures: {len(built)} files in {figures}; y limit {scale['ymax']:g}, "
         f"{sum(r['n_stems_truncated'] for r in layouts)} truncated stems, layout audit passed")
     return result
 
 
 # ------------------------------------------------------------------ completeness inventory
-# Every artefact a complete run must have: REQUIRED_ARTIFACTS[mode][engine][stat] = (label, path template, expand,
-# condition). Templates are relative to --out; {arm} is the arm, {motif} each motif key of the engine's root tables,
-# {region} each of the eight sub-regions. condition: None = always; "figures" = unless --no-figures; "stability" =
-# with --rank-stability-run; "final" = written after the status is set (command.log closes, then md5.txt), checked
-# last. A run is `complete` only when every path exists, is non-empty and has its sha256 in run_manifest.json.
-_ROOT_TABLES = [("engine root table (included)", "engine/{arm}/pVal.up.vs.bg.RNAmap.txt", None, None),
-                ("engine root table (skipped)", "engine/{arm}/pVal.dn.vs.bg.RNAmap.txt", None, None),
-                ("event counts", "event_counts.json", None, None),
-                ("quick workbook", "quick_summary.xlsx", None, None)]
-_PROVENANCE = [("index page", "index.html", None, None), ("versions record", "versions.txt", None, None),
-               ("command log", "command.log", None, "final"), ("md5 record", "md5.txt", None, "final")]
-_COUNT_ARCHIVES = [("count archive", "counts/{arm}/{motif}.counts.npz", "motif", None),
-                   ("conversion manifest", "counts/{arm}/conversion_manifest.tsv", None, None)]
-_VERIFY = [("archive verification record", "counts/{arm}/VERIFY.md", None, None)]
+# Every file a run writes: REQUIRED_ARTIFACTS[mode][engine][stat] = rows (label, path template, expand, condition).
+# Templates are relative to --out; {arm} is the arm, {motif} each motif key of the engine's root tables, {region} each
+# of the eight sub-regions. expand: None = one path; "motif" / "motif_region" = one path per motif (x sub-region);
+# "tree" = every file the step wrote under that directory, as the registry recorded it. Only directories whose file
+# names a third party chooses are trees: the engine's output directory and the matplotlib font cache rank_stability.py
+# keeps in stability/.matplotlib; everything the fork writes is listed by name.
+# condition: "+"-joined flags that must all hold (None = always): figures = quick-mode figures drawn; control =
+# --positive-control given; stability = --rank-stability-run; rmats = raw --rmats-se input; delete = verified
+# temporaries deleted (no --keep-temp); final = written after the status is set (command.log closes, then md5.txt);
+# manifest = run_manifest.json itself, which exists but cannot carry its own hash.
+# tests/test_artifact_inventory.py runs every writer on synthetic inputs and asserts that these rows, expanded, equal
+# the files the run's writers registered and the files on disk.
+_BASE = [("engine root table (included)", "engine/{arm}/pVal.up.vs.bg.RNAmap.txt", None, None),
+         ("engine root table (skipped)", "engine/{arm}/pVal.dn.vs.bg.RNAmap.txt", None, None),
+         ("engine output (third-party engine; every file recorded)", "engine/{arm}", "tree", None),
+         ("engine run log", "engine/{arm}_command.log", None, None),
+         ("engine step logs", "logs/motif_map.stdout.log", None, None),
+         ("engine step logs", "logs/motif_map.stderr.log", None, None),
+         ("contig-normalised inputs", "inputs/up.coord.txt", None, None),
+         ("contig-normalised inputs", "inputs/dn.coord.txt", None, None),
+         ("contig-normalised inputs", "inputs/bg.coord.txt", None, None),
+         ("event counts", "event_counts.json", None, None),
+         ("quick workbook", "quick_summary.xlsx", None, None),
+         ("index page", "index.html", None, None),
+         ("versions record", "versions.txt", None, None),
+         ("command log", "command.log", None, "final"),
+         ("md5 record", "md5.txt", None, "final"),
+         ("run manifest", "run_manifest.json", None, "manifest")]
+_EVENT_SETS = [("event-set gate record", "event_set_config.json", None, "rmats")] + [
+    ("event-set gate record", "event_sets/" + name, None, "rmats")
+    for name in ("up.coord.txt", "dn.coord.txt", "bg.coord.txt", "counts.json", "event_audit.json", "versions.txt",
+                 "command.log", "run_manifest.json")] + [
+    ("event-set step logs", "logs/build_event_sets." + name, None, "rmats") for name in ("stdout.log", "stderr.log")]
+_COUNT_ARCHIVES = [("count archive", "counts/{arm}/{motif}.counts.npz", "motif", None)] + [
+    ("count-archive conversion record", "counts/{arm}/" + name, None, None)
+    for name in ("conversion_manifest.tsv", "command.log", "versions.txt")]
+_VERIFY = [("archive verification record", "counts/{arm}/" + name, None, None)
+           for name in ("VERIFY.md", "detail_root_comparison.tsv", "detail_positional_mismatches.tsv",
+                        "verified_temporaries.tsv")] + [
+          ("temporary deletion inventory", "logs/temp_deletion.log", None, "delete")]
 _POSITIONAL = [("audited positional archive", "engine/{arm}/positional/{motif}.{region}.hits.npz", "motif_region",
                 None)]
 _QUICK_FIGURES = [("main-layer figure", "figures/{arm}_SE_%s_released_ranksum_rawP%s.%s"
@@ -846,83 +906,140 @@ _QUICK_FIGURES = [("main-layer figure", "figures/{arm}_SE_%s_released_ranksum_ra
                   for variant in ("main", "noSpliceosome_noBroad") for kind in ("byRBP", "byMotif")
                   for ext in ("png", "svg")] + [
                   ("main-layer figure audit", "figures/" + name, None, "figures")
-                  for name in ("selection_audit.tsv", "exclusion_audit.tsv", "naming_audit.tsv", "layout_report.json")]
-_CALIBRATION = [("calibrated supplement " + name, "summary/{arm}/" + name, None, None)
+                  for name in ("selection_audit.tsv", "exclusion_audit.tsv", "naming_audit.tsv", "layout_report.json")
+                  ] + [
+                  ("quick motif-score table", "figures/motif_scores/{arm}/per_motif_regions.tsv", None, "figures"),
+                  ("quick motif-score table", "figures/motif_scores/{arm}/command.log", None, "figures"),
+                  ("figure positive-control audit", "figures/positive_control_audit.tsv", None, "figures+control")]
+_CALIBRATION = [("calibrated supplement", "summary/{arm}/" + name, None, None)
                 for name in ("{arm}_calibrated_ranksum_v2.xlsx", "per_motif_regions.tsv", "condensed_per_rbp.tsv",
-                             "rbp_level.tsv", "refinement_report.json", "readout.md")] + [
-               ("row-unit sensitivity " + name, "summary_rowunit/{arm}/" + name, None, None)
-               for name in ("per_motif_regions.tsv", "condensed_per_rbp.tsv", "refinement_report.json", "readout.md")]
+                             "rbp_level.tsv", "positions_long.tsv", "refinement_report.json", "readout.md",
+                             "input_md5s.tsv", "command.log", "versions.txt")] + [
+               ("row-unit sensitivity", "summary_rowunit/{arm}/" + name, None, None)
+               for name in ("{arm}_calibrated_ranksum.xlsx", "per_motif_regions.tsv", "condensed_per_rbp.tsv",
+                            "positions_long.tsv", "refinement_report.json", "refinement_tasks.tsv", "readout.md",
+                            "input_md5s.tsv", "command.log", "versions.txt")] + [
+               ("calibration step logs", "logs/%s.%s" % (step, name), None, None)
+               for step in ("calibrate_ranksum_rowunit_sensitivity", "calibrate_ranksum_v2")
+               for name in ("stdout.log", "stderr.log")]
 _FULL_FIGURES = [("region lollipop (%s)" % layer, "figures/{arm}/{arm}_SE_%s_%s%s.%s"
                   % (kind, layer, "" if variant == "main" else "_" + variant, ext), None, None)
                  for layer in ("released_ranksum_rawP", "calibrated_ranksum")
                  for variant in ("main", "noSpliceosome_noBroad") for kind in ("byRBP", "byMotif")
                  for ext in ("png", "svg")] + [
-                 ("figure index", "figures/index.html", None, None),
-                 ("rank workbook", "figures/{arm}/{arm}_rank_comparison.xlsx", None, None),
-                 ("rank stability workbook", "stability/{arm}_rank_stability.xlsx", None, "stability")]
+                 ("rank workbook", "figures/{arm}/{arm}_rank_comparison.xlsx", None, None)] + [
+                 ("figure provenance sidecar", "figures/{arm}/" + name, None, None)
+                 for name in ("{arm}_figure_provenance_v43.md", "command_v43.log", "versions_v43.txt",
+                              "{arm}_rank_comparison_v43.tsv", "{arm}_rank_panel_comparisons_v43.tsv")] + [
+                 ("figure index", "figures/index.html", None, None)] + [
+                 ("full-mode figure audit", "figures/" + name, None, None)
+                 for name in ("naming_audit_v43.tsv", "naming_report_v43.json", "selection_audit_v43.tsv",
+                              "exclusion_audit_v43.tsv", "rank_agreement_summary_v43.tsv", "y_scale_audit_v43.tsv",
+                              "power_label_audit_v43.tsv", "dot_size_audit_v43.tsv", "open_dot_audit_v43.tsv",
+                              "truncation_audit_v43.tsv", "rank_universe_notes_v43.tsv", "colour_audit_v43.tsv",
+                              "colour_contrast_v432.tsv", "layout_report_v43.json", "figures_manifest_v43.tsv")] + [
+                 ("figure positive-control audit", "figures/positive_control_audit.tsv", None, "control")] + [
+                 ("figure step logs", "logs/figures_v%s.%s" % (figure_version(), name), None, None)
+                 for name in ("stdout.log", "stderr.log")]
+_STABILITY = [("rank stability", "stability/" + name, None, "stability")
+              for name in ("{arm}_rank_stability.xlsx", "{arm}_rank_stability.tsv", "{arm}_rank_stability.png",
+                           "{arm}_rank_stability.svg", "observed_per_motif.tsv", "bootstrap_weights.npz",
+                           "rank_bootstrap.npz", "README.md", "provenance.json", "run_summary.json", "command.log",
+                           "versions.txt")] + [
+              ("matplotlib font cache (third-party names; every file recorded)", "stability/.matplotlib", "tree",
+               "stability")] + [
+              ("rank stability step logs", "logs/rank_stability." + name, None, "stability")
+              for name in ("stdout.log", "stderr.log")]
+# A step's stdout/stderr and a file inside the engine's own tree may legitimately be empty; they are still hashed.
+EMPTY_ALLOWED = {"engine output (third-party engine; every file recorded)",
+                 "matplotlib font cache (third-party names; every file recorded)", "engine step logs", "event-set step logs",
+                 "calibration step logs", "figure step logs", "rank stability step logs"}
 REQUIRED_ARTIFACTS = {
     "quick": {
-        "released": {"mannwhitney": _ROOT_TABLES + _COUNT_ARCHIVES + _VERIFY + _QUICK_FIGURES + _PROVENANCE,
+        "released": {"mannwhitney": _BASE + _EVENT_SETS + _COUNT_ARCHIVES + _VERIFY + _QUICK_FIGURES,
                      # a Fisher run cannot be verified (the verifier recomputes the rank-sum) and draws no figures
-                     "fisher": _ROOT_TABLES + _COUNT_ARCHIVES + _PROVENANCE},
+                     "fisher": _BASE + _EVENT_SETS + _COUNT_ARCHIVES},
         # the archive reader targets the released countDist schema; the audited engine writes its own archives
-        "audited": {"mannwhitney": _ROOT_TABLES + _POSITIONAL + _PROVENANCE,
-                    "fisher": _ROOT_TABLES + _POSITIONAL + _PROVENANCE},
+        "audited": {"mannwhitney": _BASE + _EVENT_SETS + _POSITIONAL,
+                    "fisher": _BASE + _EVENT_SETS + _POSITIONAL},
     },
     "full": {  # validate() refuses every other engine x statistic in full mode
-        "released": {"mannwhitney": _ROOT_TABLES + _COUNT_ARCHIVES + _VERIFY + _CALIBRATION + _FULL_FIGURES
-                                    + _PROVENANCE},
+        "released": {"mannwhitney": _BASE + _EVENT_SETS + _COUNT_ARCHIVES + _VERIFY + _CALIBRATION + _FULL_FIGURES
+                                    + _STABILITY},
     },
 }
 
 
+def conditions_met(args) -> set:
+    met = {"final", "manifest"}
+    if args.mode == "quick" and not args.no_figures:
+        met.add("figures")
+    if args.positive_control:
+        met.add("control")
+    if getattr(args, "rank_stability_run", None):
+        met.add("stability")
+    if args.rmats_se:
+        met.add("rmats")
+    if not args.keep_temp:
+        met.add("delete")
+    return met
+
+
 def required_spec(args) -> list:
-    """The REQUIRED_ARTIFACTS rows that apply to this run (conditions resolved, "final" rows kept)."""
+    """The REQUIRED_ARTIFACTS rows that apply to this run (conditions resolved, "final" and "manifest" rows kept)."""
     try:
         rows = REQUIRED_ARTIFACTS[args.mode][args.engine][args.stat_method]
     except KeyError:
         raise ValueError(f"no required-artefact inventory for --mode {args.mode} --engine {args.engine} "
                          f"--stat-method {args.stat_method}") from None
-    wanted = {None, "final"}
-    if not args.no_figures:
-        wanted.add("figures")
-    if getattr(args, "rank_stability_run", None):
-        wanted.add("stability")
-    return [row for row in rows if row[3] in wanted]
+    met = conditions_met(args)
+    return [row for row in rows if row[3] is None or set(row[3].split("+")) <= met]
 
 
 def required_artefacts(args) -> list:
     """Path templates of every required artefact, for the index page and run_manifest.json."""
-    return [template.replace("{arm}", args.arm) for _, template, _, _ in required_spec(args)]
+    return [template.replace("{arm}", args.arm) + ("/**" if expand == "tree" else "")
+            for _, template, expand, _ in required_spec(args)]
 
 
-def required_paths(args, motifs, final=False) -> list:
-    """(label, relative path) of every required artefact, expanded over the root-table motifs and sub-regions.
-    final=False lists what exists before the status is set; final=True lists command.log and md5.txt."""
-    out = []
-    for label, template, expand, condition in required_spec(args):
-        if (condition == "final") != final:
+def required_paths(args, motifs, final=False, registered=None) -> list:
+    """(label, relative path) of every required artefact, expanded over the root-table motifs and sub-regions and, for
+    a tree row, over the registered files below it (the directory itself when none was registered, so it reads as
+    absent). final=False lists what exists before the status is set; final=True lists command.log and md5.txt. The run
+    manifest is never listed: it cannot carry its own hash."""
+    out, seen = [], set()
+    spec = required_spec(args)
+    # named rows first, so a file both named and inside a tree is reported under its own label
+    for label, template, expand, condition in [r for r in spec if r[2] != "tree"] + [r for r in spec if r[2] == "tree"]:
+        if condition == "manifest" or (condition == "final") != final:
             continue
         base = template.replace("{arm}", args.arm)
         if expand is None:
-            out.append((label, base))
+            rows = [(label, base)]
         elif expand == "motif":
-            out += [(label, base.replace("{motif}", m)) for m in motifs]
+            rows = [(label, base.replace("{motif}", m)) for m in motifs]
+        elif expand == "motif_region":
+            rows = [(label, base.replace("{motif}", m).replace("{region}", r)) for m in motifs for r in io.REGIONS]
         else:
-            out += [(label, base.replace("{motif}", m).replace("{region}", r)) for m in motifs for r in io.REGIONS]
+            rows = [(label, rel) for rel in sorted(registered or ()) if rel.startswith(base + "/")] or [(label, base)]
+        for row in rows:
+            if row[1] not in seen:
+                seen.add(row[1])
+                out.append(row)
     return out
 
 
 def inventory(out: Path, required) -> tuple:
-    """(hashed rows, missing lines): every required path must exist and be non-empty; each present one is
-    sha256-hashed. Missing paths are grouped by label, so a partial archive conversion reads '3 of 726 absent'."""
+    """(hashed rows, missing lines): every required path must exist and be non-empty (EMPTY_ALLOWED labels and files
+    registered outside REQUIRED_ARTIFACTS may be empty); each present one is sha256-hashed. Missing paths are grouped by
+    label, so a partial archive conversion reads '3 of 726 absent'."""
     rows, absent, total = [], {}, {}
     for label, rel in required:
         total[label] = total.get(label, 0) + 1
         path = out / rel
         if not path.is_file():
             absent.setdefault(label, []).append((rel, "absent"))
-        elif path.stat().st_size == 0:
+        elif path.stat().st_size == 0 and label not in EMPTY_ALLOWED and not label.startswith("registered by "):
             absent.setdefault(label, []).append((rel, "empty"))
         else:
             rows.append({"artefact": label, "path": rel, "bytes": path.stat().st_size, "sha256": sha256(path)})
@@ -932,6 +1049,49 @@ def inventory(out: Path, required) -> tuple:
         missing.append(f"{label}: {len(items)} of {total[label]} absent or empty ({first}"
                        + (", ..." if len(items) > 3 else "") + ")")
     return rows, missing
+
+
+def verify_run(run_dir) -> tuple:
+    """Re-check a finished run against its run_manifest.json: (status, exit code, problem lines).
+
+    Every hashed artefact must still exist, be non-empty and match its sha256, and every file the writers registered
+    must carry a hash; one lost or changed file makes the run INCOMPLETE. Otherwise the recorded status stands."""
+    run_dir = Path(run_dir)
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        return "INCOMPLETE", 4, [f"run_manifest.json absent under {run_dir}"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    problems = []
+    rows = manifest.get("inventory") or []
+    if not rows:
+        problems.append("run_manifest.json carries no hashed inventory")
+    for row in rows:
+        path = run_dir / row["path"]
+        if not path.is_file():
+            problems.append(f"{row['path']} absent ({row['artefact']})")
+        elif path.stat().st_size == 0 and row["bytes"] > 0:
+            problems.append(f"{row['path']} empty ({row['artefact']})")
+        elif sha256(path) != row["sha256"]:
+            problems.append(f"{row['path']} changed since the run ({row['artefact']})")
+    hashed = {row["path"] for row in rows}
+    for rel in manifest.get("registered", []):
+        if rel != "run_manifest.json" and rel not in hashed:
+            problems.append(f"{rel} was registered by a writer but carries no hash")
+    codes = {status: code for status, code, _ in STATUS_PRECEDENCE}
+    recorded = manifest.get("status", "failed")
+    status = "INCOMPLETE" if problems else recorded
+    return status, codes.get(status, 1), problems
+
+
+def verify_main(argv) -> int:
+    parser = argparse.ArgumentParser(description="Re-hash a finished rmaps3_skill_run.py run against its manifest.")
+    parser.add_argument("--verify", required=True, metavar="RUN_DIR")
+    args = parser.parse_args(argv)
+    status, code, problems = verify_run(args.verify)
+    print(f"VERIFY {status} (exit {code}): {len(problems)} problem(s) against run_manifest.json in {args.verify}")
+    for line in problems:
+        print("  " + line)
+    return code
 
 
 # ------------------------------------------------------------------ index page
@@ -1058,7 +1218,7 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
     if conversion.get("reason"):
         parts.append(f"<p>Count archives: {esc(conversion['reason'])}</p>")
     parts.append("</html>")
-    path = out / "index.html"
+    path = register(out / "index.html", "write_index")
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
     return path
 
@@ -1129,15 +1289,35 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
             "writes; pass --rank-stability-run <audited engine dir> to include it")
 
     figures = out / "figures"
-    run_step("figures_v" + figure_version(), figure_command(args, out, engine_out, summary_root), log, env, ROOT, out)
+    step = "figures_v" + figure_version()
+    run_step(step, figure_command(args, out, engine_out, summary_root), log, env, ROOT, out)
+    check_builder_manifest(figures, "step " + step)
     produced.append(("Region lollipops, figure version " + figure_version(),
                      [("figure index", figures / "index.html"),
                       ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
     return produced
 
 
+def check_builder_manifest(figures: Path, writer: str) -> None:
+    """The builder lists in figures_manifest_v43.tsv exactly the files its writers registered; the files its step
+    actually created must be that list plus the manifest, or a builder writer escaped registration."""
+    if _REGISTRY is None:
+        return
+    import csv
+    manifest = figures / "figures_manifest_v43.tsv"
+    with open(manifest, encoding="utf-8", newline="") as handle:
+        listed = {Path(r["file"]).resolve() for r in csv.DictReader(handle, delimiter="\t") if r["status"] == "built"}
+    listed.add(manifest.resolve())
+    written = {(_REGISTRY.root / rel).resolve() for rel, w in _REGISTRY.entries.items() if w == writer}
+    if listed != written:
+        raise RuntimeError("figure builder registry disagrees with its output: unlisted "
+                           f"{sorted(str(x) for x in written - listed)[:5]}, listed but not written "
+                           f"{sorted(str(x) for x in listed - written)[:5]}")
+
+
 def figure_command(args, out: Path, engine_out: Path, summary_root: Path) -> list:
-    """The full-mode figure builder call: every title, rule, control and text is passed explicitly."""
+    """The full-mode figure builder call: every title, rule, control, text and motif table is passed explicitly."""
+    known, additional = motif_tables(args, engine_root_of(args))
     command = [sys.executable, str(ROOT / "tools" / "build_region_lollipops_v4.py"),
                "--arms", args.arm, "--out-root", str(out / "figures"),
                "--released-root", str(engine_out.parent),
@@ -1145,6 +1325,8 @@ def figure_command(args, out: Path, engine_out: Path, summary_root: Path) -> lis
                "--counts-json", f"{args.arm}={out / 'event_counts.json'}",
                "--arm-label", f"{args.arm}={args.arm_label}",
                "--alias-table", str(args.alias_table), "--gtf", str(args.gtf),
+               "--naming-table", str(known),
+               "--esrp-table", str(additional or ROOT / "data" / "ESRP.like.motif.txt"),
                "--spliceosome-list", str(args.spliceosome_list),
                "--broad-binders-list", str(args.broad_binders_list),
                "--author-maps-root", str(engine_out.parent),
@@ -1349,6 +1531,10 @@ def require_site_paths(args) -> None:
 
 
 def main(argv=None) -> int:
+    global _REGISTRY
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--verify" in argv:
+        return verify_main(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -1360,6 +1546,7 @@ def main(argv=None) -> int:
     out = Path(args.out).resolve()
     fresh_directory(out)
     (out / "logs").mkdir(exist_ok=True)
+    _REGISTRY = ArtifactRegistry(out)
     log = Logger(out / "command.log")
     started = time.perf_counter()
     manifest = {"schema_version": 1, "status": "running", "mode": args.mode, "arm": args.arm,
@@ -1372,7 +1559,7 @@ def main(argv=None) -> int:
                 "required_artefacts": required_artefacts(args),
                 "fork_revision": git_revision(ROOT), "versions": versions(), "steps": [],
                 "engine_commit_verified": engine_sha}
-    (out / "versions.txt").write_text(
+    register(out / "versions.txt", "main").write_text(
         "\n".join(f"{k}\t{v}" for k, v in manifest["versions"].items())
         + f"\nfork_revision\t{manifest['fork_revision']}"
         + f"\nwrapper\t{Path(__file__).resolve()}"
@@ -1438,7 +1625,7 @@ def main(argv=None) -> int:
                                               alias, known, additional, log)
         # Completeness: every required path exists, is non-empty and is sha256-hashed into the manifest. The
         # index is written after the others are checked (it prints what is missing), then checked itself.
-        required = required_paths(args, root_motifs)
+        required = required_paths(args, root_motifs, registered=_REGISTRY.paths())
         hashed, missing = inventory(out, [r for r in required if r[1] != "index.html"])
         if (figures or {}).get("skipped") and not args.no_figures and any(
                 c == "figures" for _, _, _, c in required_spec(args)):
@@ -1447,6 +1634,15 @@ def main(argv=None) -> int:
         index_rows, index_missing = inventory(out, [r for r in required if r[1] == "index.html"])
         hashed += index_rows
         missing += index_missing
+        # every registered file is hashed; one no REQUIRED_ARTIFACTS row names is an inventory defect, recorded
+        listed = {rel for _, rel in required} | {rel for _, rel in required_paths(args, root_motifs, final=True)}
+        extra = [(("registered by " + writer + ", not in REQUIRED_ARTIFACTS"), rel)
+                 for rel, writer in sorted(_REGISTRY.entries.items()) if rel not in listed]
+        extra_rows, _ = inventory(out, extra)
+        hashed += extra_rows
+        manifest["registered_not_required"] = [rel for _, rel in extra]
+        for _, rel in extra:
+            log("WARN registered but not in REQUIRED_ARTIFACTS: " + rel)
         manifest["inventory"] = hashed
         figure_controls = (figures or {}).get("controls", [])
         manifest.update(status="inventory_checked", engine_wall_seconds=wall,
@@ -1474,7 +1670,7 @@ def main(argv=None) -> int:
         # command.log is closed with its exit line; md5.txt then records every file as left except itself and
         # run_manifest.json, which is written last and carries the sha256 of every required artefact,
         # md5.txt and command.log included (a file cannot carry its own hash).
-        with open(out / "md5.txt", "w", encoding="utf-8") as handle:
+        with open(register(out / "md5.txt", "main"), "w", encoding="utf-8") as handle:
             handle.write("md5\tbytes\tpath\n")
             for path in sorted(out.rglob("*")):
                 if path.is_file() and path.name not in ("md5.txt", "run_manifest.json"):
@@ -1487,8 +1683,13 @@ def main(argv=None) -> int:
                 manifest["missing"] = manifest.get("missing", []) + final_missing
                 manifest["status"], exit_code = run_status(manifest["missing"], args.allow_partial,
                                                            manifest.get("control_failed", False))
+        register(out / "run_manifest.json", "main")
+        manifest["registered"] = _REGISTRY.paths()
+        manifest["unregistered_files"] = sorted(_REGISTRY.files_on_disk() - set(_REGISTRY.entries)
+                                                - {"run_manifest.json"})
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n",
                                                encoding="utf-8")
+        _REGISTRY = None
     return exit_code
 
 

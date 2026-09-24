@@ -21,6 +21,8 @@ from test_engine_synthetic import synthetic, input_paths  # noqa: E402,F401
 from test_skill_run import run_skill  # noqa: E402
 
 MOTIFS = ["QKI.ACUAAY", "RBFOX2.UGCAUG"]
+# files a writer registered inside the two third-party-named trees (the engine's own output, a matplotlib cache)
+REGISTERED = ["engine/S_A/maps/SE.QKI-ACUAAY.png", "stability/.matplotlib/fontlist.json"]
 
 
 def quick_args(tmp_path, genome_root, out, *extra):
@@ -49,14 +51,14 @@ CASES = {  # (mode, extra flags) -> one engine x statistic cell of REQUIRED_ARTI
 def populate(out, args):
     """A fake run directory holding every required path, each non-empty."""
     for final in (False, True):
-        for _, rel in skill.required_paths(args, MOTIFS, final=final):
+        for _, rel in skill.required_paths(args, MOTIFS, final=final, registered=REGISTERED):
             path = out / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"x")
 
 
 def status_of(out, args):
-    rows, missing = skill.inventory(out, skill.required_paths(args, MOTIFS)
+    rows, missing = skill.inventory(out, skill.required_paths(args, MOTIFS, registered=REGISTERED)
                                     + skill.required_paths(args, MOTIFS, final=True))
     return skill.run_status(missing, args.allow_partial, False), rows, missing
 
@@ -103,7 +105,8 @@ def test_a_fully_populated_run_is_complete_and_every_path_is_hashed(case, tmp_pa
     populate(tmp_path, args)
     (status, code), rows, missing = status_of(tmp_path, args)
     assert (status, code, missing) == ("complete", 0, [])
-    expected = [rel for _, rel in skill.required_paths(args, MOTIFS) + skill.required_paths(args, MOTIFS, final=True)]
+    expected = [rel for _, rel in skill.required_paths(args, MOTIFS, registered=REGISTERED)
+                + skill.required_paths(args, MOTIFS, final=True)]
     assert [r["path"] for r in rows] == expected
     assert all(r["sha256"] == hashlib.sha256(b"x").hexdigest() for r in rows)
 
@@ -114,7 +117,8 @@ def test_one_missing_one_empty_or_a_partial_archive_set_is_not_complete(case, da
     mode, extra = CASES[case]
     args = parsed(mode, *extra)
     populate(tmp_path, args)
-    required = [rel for _, rel in skill.required_paths(args, MOTIFS)]
+    required = [rel for label, rel in skill.required_paths(args, MOTIFS, registered=REGISTERED)
+                if label not in skill.EMPTY_ALLOWED]
     if damage == "partial_archive":   # one motif's archive(s) absent: fewer archives than root-table motifs
         victims = [r for r in required if MOTIFS[1] in r and (r.endswith(".counts.npz") or r.endswith(".hits.npz"))]
         assert victims

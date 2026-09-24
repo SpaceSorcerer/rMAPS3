@@ -15,7 +15,8 @@ Status key:
 
 | Tool | Purpose | Layer | Status |
 |---|---|---|---|
-| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.3 figures. Status `complete` needs every path of `REQUIRED_ARTIFACTS[mode][engine][stat]` present, non-empty and sha256-hashed in `run_manifest.json` | wrapper | CANONICAL |
+| `rmaps3_skill_run.py` | One command per arm: `--mode quick` runs the engine, verifies the archives and draws the main-layer figures; `--mode full` adds the supplement, the row-unit sensitivity, rank stability and the v4.3.3 figures. Status `complete` needs every path of `REQUIRED_ARTIFACTS[mode][engine][stat]` present, non-empty and sha256-hashed in `run_manifest.json`, and that table equals the files the writers register (`tests/test_artifact_inventory.py`); `--verify <OUT_DIR>` re-hashes a finished run | wrapper | CANONICAL |
+| `rmaps_artifacts.py` | `ArtifactRegistry`: every writer of the wrapper and the figure builder registers the files it writes; the wrapper hashes all of them into `run_manifest.json` | wrapper | CANONICAL |
 | `build_event_sets.py` | Portable stdlib Rule-A pre-split builder, with eight-column coordinates and a gate ledger | inputs | CANONICAL (portable) |
 | `build_event_sets_lab_full.py` | The pandas lab builder behind the lab event sets: rule A, frozen rule B, and `--vast-conf effect-only` for ruleBeffect. Needs `requirements-lab-full.txt` | inputs | CANONICAL (lab) |
 | `countdist_to_npz.py` | Packs a released run's `temp/*.countDist.*.txt` into per-motif `*.counts.npz` archives | main layer | CANONICAL |
