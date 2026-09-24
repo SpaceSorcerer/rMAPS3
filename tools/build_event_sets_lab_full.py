@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Homo sapiens / GRCh38 (hg38) / GENCODE v49; count-only SE gate sensitivity.
 # Functions/constants below copied verbatim from:
-# F:\Publication Work\00_PAPER_FIGURES\Fig3_rMAPS_and_RBP-RELI\02_RESUME_2026-09-08\reli_v121\code\build_reli_foregrounds_v2.py
+# reli_v121/code/build_reli_foregrounds_v2.py of the frozen RBP-RELI ledger tree (--frozen-root)
 # source MD5: 32be07fd0e6e2edff5f077384f45b352
 from __future__ import annotations
 
@@ -458,12 +458,11 @@ from itertools import product
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
-ROOT = Path(r'E:\rmaps_work')
-FROZEN = Path(r'F:\Publication Work\00_PAPER_FIGURES\Fig3_rMAPS_and_RBP-RELI\02_RESUME_2026-09-08\reli_v121')
-SOURCE = FROZEN / 'code' / 'build_reli_foregrounds_v2.py'
+# Site roots are required arguments (--work-root, --frozen-root, --packages-root, --fai), bound in
+# main(). The 2026-09-17 lab event sets were built by the byte-identical lab copy of this file
+# before that change (git show 0ecf0cc:tools/build_event_sets_lab_full.py); the lab keeps that copy.
+ROOT = FROZEN = SOURCE = PACKAGES = None
 SOURCE_MD5 = '32be07fd0e6e2edff5f077384f45b352'
-PACKAGES = Path(r'F:\rMAPS\inputs\rmaps_packages_2026-09-08')
-FAI = Path(r'E:\references\rmaps_genomes\hg38\hg38.fa.fai')
 COORD_COLS = ['chr', 'strand', 'exonStart_0base', 'exonEnd', 'upstreamES', 'upstreamEE', 'downstreamES', 'downstreamEE']
 COORD_HEADER = ['chr', 'strand', 'exonStart', 'exonEnd', 'firstExonStart', 'firstExonEnd', 'secondExonStart', 'secondExonEnd']
 INPUT_HASHES = {}
@@ -747,15 +746,30 @@ def arguments():
     p.add_argument('--rule', nargs='+', choices=['A', 'B'], default=['A', 'B'])
     p.add_argument('--vast-conf', choices=['mv', 'effect-only'], default='mv',
                    help='Rule B confidence: frozen MV>0 (default), or effect-only ruleBeffect.')
-    p.add_argument('--outdir', type=Path, default=ROOT / 'event_sets')
-    p.add_argument('--logdir', type=Path, default=ROOT / 'logs')
-    p.add_argument('--fai', type=Path, default=FAI)
+    p.add_argument('--work-root', type=Path, required=True,
+                   help='work tree; outputs must lie under it and its logs/ holds the parent records')
+    p.add_argument('--frozen-root', type=Path, required=True,
+                   help='frozen reli_v121 tree (code/, foregrounds/, FOREGROUND_LEDGER.md)')
+    p.add_argument('--packages-root', type=Path, required=True,
+                   help='rMATS packages root holding <ARM>/SE.MATS.JC.txt')
+    p.add_argument('--outdir', type=Path, default=None, help='default <work-root>/event_sets')
+    p.add_argument('--logdir', type=Path, default=None, help='default <work-root>/logs')
+    p.add_argument('--fai', type=Path, required=True, help='human hg38 FASTA index (.fa.fai)')
     p.add_argument('--overwrite', action='store_true', help='Replace only this script\'s named output files in selected combinations.')
     return p.parse_args()
 
 
+def bind_site_roots(args):
+    global ROOT, FROZEN, SOURCE, PACKAGES
+    ROOT, FROZEN, PACKAGES = args.work_root, args.frozen_root, args.packages_root
+    SOURCE = FROZEN / 'code' / 'build_reli_foregrounds_v2.py'
+    args.outdir = args.outdir or ROOT / 'event_sets'
+    args.logdir = args.logdir or ROOT / 'logs'
+
+
 def main():
     args = arguments()
+    bind_site_roots(args)
     for path in (args.outdir, args.logdir):
         require(path.is_absolute() and path.resolve().is_relative_to(ROOT.resolve()), f'Output must be under {ROOT}: {path}')
     if not args.overwrite:

@@ -33,6 +33,9 @@ from openpyxl.styles import Font
 from scipy.special import gammaln
 from scipy.stats import false_discovery_control, fisher_exact, hypergeom
 
+# The audited engine of this checkout (legacy/, rmaps_core/, cli.py unchanged since 3faead9).
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+
 
 REGIONS = (
     "UpstreamExon_3prime",
@@ -734,7 +737,7 @@ def summarize(
     permutations: int,
     seed: int,
     workers: int,
-    engine_root: Path = Path(r"E:\Claude\rMAPS3_fix"),
+    engine_root: Path = ENGINE_ROOT,
     chunk_size: int = 500,
     refine_perms: int = 100000,
     refine_threshold: float = 0.005,
@@ -1072,7 +1075,7 @@ def parse_args(argv=None):
     parser.add_argument("--refine-threshold", type=float, default=0.005)
     parser.add_argument("--refine-max-tasks", type=int, default=400)
     parser.add_argument("--chunk-size", type=int, default=500)
-    parser.add_argument("--engine-root", type=Path, default=Path(r"E:\Claude\rMAPS3_fix"))
+    parser.add_argument("--engine-root", type=Path, default=ENGINE_ROOT)
     args = parser.parse_args(argv)
     if args.perms < 1 or args.workers < 1 or args.chunk_size < 1:
         parser.error("--perms, --workers, and --chunk-size must be positive integers")

@@ -7,7 +7,7 @@ quick  runs the engine exactly as the lab launchers do, converts the countDist t
        region lollipops (released rank-sum raw p only; --no-figures skips them) + index.html.
 full   adds the lab layers: the reportable calibrated supplement (calibrate_ranksum_v2.py: target-exon
        cluster permutation, RBP-level min-P, unique-k-mer family, row-unit sensitivity columns),
-       foreground-bootstrap rank stability and the version 4.2 region lollipops for both layers with
+       foreground-bootstrap rank stability and the version 4 region lollipops for both layers with
        their rank workbook.
 
 Nothing here recomputes or rewrites an engine output. Every path default is a lab convenience and
@@ -34,12 +34,18 @@ sys.path.insert(0, str(ROOT / "tools"))
 import rmaps_countdist_io as io  # noqa: E402
 from rmaps3_lab_run import COORD_HEADER, normalize_coordinates  # noqa: E402
 
-# Documented lab defaults. Every one is overridable; none is required to be present.
-DEFAULT_GENOME_ROOT = r"E:\references\rmaps_genomes"
-DEFAULT_RELEASED_ENGINE = r"E:\Claude\rMAPS3_upstream"
-DEFAULT_GTF = r"E:\references\gencode_v49\gencode.v49.primary_assembly.annotation.gtf"
-DEFAULT_EXCLUSION_ROOT = r"F:\RNA-SEQ-ANALYSIS\RBP-RELI\RBP-RELI\reli\data"
+# Site paths (genome root, released-engine checkout, GTF, exclusion lists) are arguments with no
+# default: the lab passes them from the rmaps3-quick / rmaps3-full skills. Only repo files default.
 DEFAULT_ALIAS = ROOT / "data" / "rbp_alias_hgnc_2026-09-17.tsv"
+
+
+def figure_version() -> str:
+    """FIG_VERSION of tools/build_region_lollipops_v4.py, read from its source so labels never drift."""
+    text = (ROOT / "tools" / "build_region_lollipops_v4.py").read_text(encoding="utf-8")
+    match = re.search(r"^FIG_VERSION = '([^']+)'", text, re.M)
+    if not match:
+        raise ValueError("FIG_VERSION not found in tools/build_region_lollipops_v4.py")
+    return match.group(1)
 
 STAT_CAVEATS = {
     "fisher": ("Fisher counts MOTIF HITS, not exons: repeated hits in one exon enter the 2x2 table "
@@ -222,9 +228,18 @@ def prepare_inputs(args, out: Path, log: Logger, env: dict):
 
 
 # ------------------------------------------------------------------ engine
+def engine_root_of(args) -> Path:
+    """The released engine must be named explicitly; the audited engine defaults to this checkout."""
+    if args.engine_root:
+        return Path(args.engine_root)
+    if args.engine == "released":
+        raise ValueError("--engine released needs --engine-root <checkout of the released engine, "
+                         "e.g. a worktree of tag upstream-base-2026-09-16>")
+    return ROOT
+
+
 def run_engine(args, paths, out: Path, log: Logger, env: dict):
-    engine_root = Path(args.engine_root or
-                       (DEFAULT_RELEASED_ENGINE if args.engine == "released" else ROOT))
+    engine_root = engine_root_of(args)
     if not (engine_root / "cli.py").is_file():
         raise ValueError(f"No cli.py under the {args.engine} engine root: {engine_root}")
     known = Path(args.known_motifs) if args.known_motifs else engine_root / "data" / "knownMotifs.human.mouse.txt"
@@ -631,7 +646,7 @@ def figure_positive_control(selections: dict, arm: str, symbol: str, panels) -> 
 
 def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: list,
                         scores: dict, alias: dict, known: Path, additional, log) -> dict:
-    """Main-layer region lollipops (released rank-sum, raw p) drawn by the v4.2 builder's own
+    """Main-layer region lollipops (released rank-sum, raw p) drawn by the v4 builder's own
     functions: naming, released-table reader, motif scores, shared y-scale, panel selection and
     draw_figure with its layout audit. The builder's main() is not used because its
     rank-comparison step needs a second layer or a v3.1 archive; nothing in it is modified."""
@@ -659,7 +674,7 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
              "broad_binders": lol.load_exclusion_list(args.broad_binders_list)}
     lists = {k: {aliases.get(s, s) for s in v} for k, v in lists.items()}
     counts, _ = lol.gate_counts(None, arm, None, out / "event_counts.json")
-    engine_root = Path(args.engine_root or DEFAULT_RELEASED_ENGINE)
+    engine_root = engine_root_of(args)
     entries, _, n_motifs = lol.released_entries(arm, engine_out.parent, mappings,
                                                 git_revision(engine_root)[:7], args.stat_method)
     exclusion_rows, dropped = lol.exclusion_audit(arm, entries, lists)
@@ -848,7 +863,7 @@ def target_exon_line(report_path: Path) -> str:
 
 
 def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger, env: dict):
-    """Row-unit sensitivity, the reportable calibration v2.1, optional rank stability, figures v4.2."""
+    """Row-unit sensitivity, the reportable calibration v2.1, optional rank stability, v4 figures."""
     produced = []
     if counts_root is None:
         raise RuntimeError("--mode full needs the count archives; the countDist temporaries were "
@@ -911,9 +926,7 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                "--spliceosome-list", str(args.spliceosome_list),
                "--broad-binders-list", str(args.broad_binders_list),
                "--author-maps-root", str(engine_out.parent),
-               "--released-commit", git_revision(
-                   Path(args.engine_root or (DEFAULT_RELEASED_ENGINE if args.engine == "released"
-                                             else ROOT)))[:7],
+               "--released-commit", git_revision(engine_root_of(args))[:7],
                "--released-stat-method", args.stat_method,
                "--top-n", str(args.top_n)]
     if args.arm in set(args.underpowered_arms):
@@ -924,8 +937,8 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                         ("--direction-text", args.direction_text), ("--tail-text", args.tail_text)):
         if value:
             command += [flag, str(value)]
-    run_step("figures_v4.2", command, log, env, ROOT, out)
-    produced.append(("Region lollipops, figure version 4.2",
+    run_step("figures_v" + figure_version(), command, log, env, ROOT, out)
+    produced.append(("Region lollipops, figure version " + figure_version(),
                      [("figure index", figures / "index.html"),
                       ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
     return produced
@@ -944,12 +957,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--up")
     p.add_argument("--dn")
     p.add_argument("--bg")
-    p.add_argument("--genome-root", default=DEFAULT_GENOME_ROOT)
+    p.add_argument("--genome-root", default=None,
+                   help="required: directory holding <genome>/<genome>.fa and its .fai")
     p.add_argument("--genome", default="hg38", help="FASTA build directory name, e.g. hg38 or mm10")
     p.add_argument("--species", default="Homo sapiens")
     p.add_argument("--engine", choices=("released", "audited"), default="released")
     p.add_argument("--engine-root", default=None,
-                   help=f"released default {DEFAULT_RELEASED_ENGINE}; audited default {ROOT}")
+                   help=f"required for --engine released; audited default {ROOT}")
     p.add_argument("--stat-method", choices=("fisher", "mannwhitney"), default="mannwhitney")
     p.add_argument("--known-motifs", default=None)
     p.add_argument("--additional-motifs", default=None)
@@ -986,9 +1000,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bootstraps", type=int, default=300)
     p.add_argument("--rank-stability-run", default=None,
                    help="audited engine directory carrying positional/*.hits.npz")
-    p.add_argument("--gtf", default=DEFAULT_GTF)
-    p.add_argument("--spliceosome-list", default=str(Path(DEFAULT_EXCLUSION_ROOT) / "spliceosome_census.txt"))
-    p.add_argument("--broad-binders-list", default=str(Path(DEFAULT_EXCLUSION_ROOT) / "broad_binders.txt"))
+    p.add_argument("--gtf", default=None,
+                   help="GENCODE GTF for figure naming; required whenever figures are drawn")
+    p.add_argument("--spliceosome-list", default=None,
+                   help="core-spliceosome list for the _noSpliceosome_noBroad variant; required with figures")
+    p.add_argument("--broad-binders-list", default=None,
+                   help="broad-binder list for the _noSpliceosome_noBroad variant; required with figures")
     p.add_argument("--method-comparison", default=None)
     p.add_argument("--underpowered-arms", nargs="*", default=[])
     p.add_argument("--top-n", type=int, default=10)
@@ -1027,8 +1044,8 @@ def validate(args) -> None:
                          "'_' (e.g. QKI_KO_B -> rule B); name the arm <NAME>_<RULE> or pass --no-figures")
     if draws and presplit and not args.gate_counts:
         raise ValueError("the figure footer prints the gate's expression-unknown event counts, which "
-                         "pre-split files do not carry; pass --gate-counts <counts.json> (e.g. "
-                         r"F:\rMAPS\event_sets\<ARM>\<gate>_rule<R>\counts.json) or --no-figures")
+                         "pre-split files do not carry; pass --gate-counts <counts.json> (the gate "
+                         "record <event_sets>/<ARM>/<gate>_rule<R>/counts.json) or --no-figures")
     if args.gate_counts and not presplit:
         raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
@@ -1042,11 +1059,31 @@ def validate(args) -> None:
         print("*" * 78, file=sys.stderr)
 
 
+def require_site_paths(args) -> None:
+    """Site paths have no default; refuse before any output exists when a needed one is missing."""
+    missing = []
+    if not args.genome_root:
+        missing.append("--genome-root")
+    if args.engine == "released" and not args.engine_root:
+        missing.append("--engine-root (checkout of the released engine)")
+    draws = args.mode == "full" or (figures_wanted(args) and args.engine == "released"
+                                    and args.stat_method == "mannwhitney")
+    if draws:
+        missing += [flag for flag, value in (("--gtf", args.gtf),
+                                              ("--spliceosome-list", args.spliceosome_list),
+                                              ("--broad-binders-list", args.broad_binders_list))
+                    if not value]
+    if missing:
+        raise ValueError("missing site path(s): " + ", ".join(missing)
+                         + (" (figures need the naming inputs; --no-figures skips them)" if draws else ""))
+
+
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         validate(args)
+        require_site_paths(args)
     except ValueError as exc:
         parser.exit(2, f"ERROR: {exc}\n")
     out = Path(args.out).resolve()

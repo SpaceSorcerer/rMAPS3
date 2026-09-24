@@ -107,7 +107,7 @@ def rbp_label(row):
 
 def tick_label(row, kind):
     """by-RBP: the HGNC group. by-motif: the same, except the synthetic ESRP-like hexamers,
-    which carry no gene name and are shown by sequence (F:\\rMAPS\\CLAUDE.md figure conventions)."""
+    which carry no gene name and are shown by sequence (lab rMAPS project figure conventions)."""
     if kind == 'byMotif' and row['_naming_action'] == 'esrp_like_group':
         return f'{row["motif_key"].split(".", 1)[1]} (ESRP-like)'
     return row['_label']
@@ -680,7 +680,7 @@ def ratio_area(r):
 
 # ---------------------------------------------------------------- colour: direction hue x significance depth (v4.3)
 # Hues and light tints are the RBP-RELI builder's own hex codes
-# (F:/RNA-SEQ-ANALYSIS/RBP-RELI/RBP-RELI/scripts/build_region_resolved_lollipop.py: INCL_GOLD, SKIP_BLUE, and the
+# (RBP-RELI repo scripts/build_region_resolved_lollipop.py: INCL_GOLD, SKIP_BLUE, and the
 # first stop of gold_cmap / blue_cmap). Grey = Okabe-Ito grey. Ramp: OKLCh, hue held at the full colour's hue,
 # lightness and chroma linear in -log10 s from the tint (s just below 0.05) to the full hue (s at the floor/cap).
 DIRECTION_HUE = {'INCLUDED': '#E69F00', 'SKIPPED': '#0072B2'}

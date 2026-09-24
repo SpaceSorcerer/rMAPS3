@@ -22,13 +22,14 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import rankdata
 
-SUMMARY_PATH = Path(r'E:\rmaps_summ\scripts\summarize_rmaps_regions_v5.py')
-ENGINE_ROOT = Path(r'E:\Claude\rMAPS3_fix')
-ALIASES_PATH = Path(r'F:\rMAPS\scripts\rbp_alias_hgnc_2026-09-17.tsv')
-FIGURE_SKILL = Path(r'C:\Users\ambur\.claude\skills\rnaseq-figure-style\SKILL.md')
-XLSX_SKILL = Path(r'C:\Users\ambur\.codex\plugins\cache\anthropic-agent-skills\document-skills\local\skills\xlsx\SKILL.md')
+TOOLS_DIR = Path(__file__).resolve().parent
+# The lab v5 summarizer (byte-identical to the 2026-09-17 lab copy) and the audited engine of this
+# checkout (legacy/, rmaps_core/ and cli.py unchanged since 3faead9) supply the readers.
+SUMMARY_PATH = TOOLS_DIR / 'summarize_rmaps_regions_lab_v5.py'
+ENGINE_ROOT = TOOLS_DIR.parent
+ALIASES_PATH = ENGINE_ROOT / 'data' / 'rbp_alias_hgnc_2026-09-17.tsv'
 sys.path.insert(0, str(SUMMARY_PATH.parent))
-import summarize_rmaps_regions_v5 as native
+import summarize_rmaps_regions_lab_v5 as native
 
 POOLS = {k: native.POOL_TO_REGIONS[k] for k in ('Upstream Intron', 'Exon Body', 'Downstream Intron')}
 DIRECTIONS = {'up': 0, 'dn': 1}
@@ -195,7 +196,7 @@ def write_figure(out, arm, rows, boot):
 def run_analysis(args):
     started = time.perf_counter()
     run, out, aliases_path = args.run.resolve(), args.out.resolve(), args.aliases.resolve()
-    if out == run or run in out.parents or Path(r'E:\rmaps_summ') == out or Path(r'E:\rmaps_summ') in out.parents:
+    if out == run or run in out.parents or TOOLS_DIR == out or TOOLS_DIR in out.parents:
         raise ValueError('Output must be outside read-only input and production summarizer directories')
     out.mkdir(parents=True, exist_ok=True)
     prefix = out / f'{args.arm}_rank_stability.tsv'
@@ -219,7 +220,7 @@ def run_analysis(args):
     if manifest.get('statistical_method') != 'fisher':
         raise ValueError('Manifest must specify statistical_method=fisher')
     sources = [Path(__file__).resolve(), SUMMARY_PATH, ENGINE_ROOT / 'rmaps_core' / 'positional_io.py',
-               aliases_path, manifest_path, FIGURE_SKILL, XLSX_SKILL]
+               aliases_path, manifest_path]
     roots = {}
     for direction in DIRECTIONS:
         path = run / f'pVal.{direction}.vs.bg.RNAmap.txt'

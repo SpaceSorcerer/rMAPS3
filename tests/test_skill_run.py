@@ -238,14 +238,15 @@ def test_positive_control_passes_only_at_rank_one(tmp_path):
 
 def test_readme_names_the_statistic_caveat_and_the_counted_unit(tmp_path):
     engine, _, _, motifs = synthetic_engine_run(tmp_path)
-    args = parse(*BASE[:4], "--out", str(tmp_path), "--up", "u", "--dn", "d", "--bg", "b")
+    args = parse(*BASE[:4], "--out", str(tmp_path), "--up", "u", "--dn", "d", "--bg", "b",
+                 "--genome-root", "genomes")
     rows = skill.readme_rows(args, engine, ROOT, fake_counts(), {"reason": "x"}, motifs,
                              Path("known.txt"), Path("esrp.txt"))
     text = json.dumps(rows)
     assert "anti-conservative" in text
     assert "one rMATS SE event, not one distinct target exon" in text
     fisher = parse(*BASE[:4], "--out", str(tmp_path), "--up", "u", "--dn", "d", "--bg", "b",
-                   "--stat-method", "fisher")
+                   "--genome-root", "genomes", "--stat-method", "fisher")
     fisher_text = json.dumps(skill.readme_rows(fisher, engine, ROOT, fake_counts(), {}, motifs,
                                                Path("k"), Path("e")))
     assert "counts MOTIF HITS, not exons" in fisher_text
@@ -592,3 +593,22 @@ def test_quick_figures_are_byte_identical_across_two_builds(tmp_path):
 
     assert [p.name for p in first["figures"]] == [p.name for p in second["figures"]]
     assert [digest(p) for p in first["figures"]] == [digest(p) for p in second["figures"]]
+
+
+def test_site_paths_have_no_default_and_are_refused_when_needed():
+    presplit = ("--up", "u", "--dn", "d", "--bg", "b")
+    with pytest.raises(ValueError, match="--genome-root"):
+        skill.require_site_paths(parse(*BASE, *presplit, "--engine-root", "e"))
+    with pytest.raises(ValueError, match="--engine-root"):
+        skill.require_site_paths(parse(*BASE, *presplit, "--genome-root", "g"))
+    skill.require_site_paths(parse(*BASE, *presplit, "--genome-root", "g", "--engine-root", "e"))
+    skill.require_site_paths(parse(*BASE, *presplit, "--genome-root", "g", "--engine", "audited"))
+    figures = ("--mode", "quick", "--arm", "QKI_KO_T", "--out", "o", *presplit,
+               "--genome-root", "g", "--engine-root", "e")
+    with pytest.raises(ValueError, match="--gtf, --spliceosome-list, --broad-binders-list"):
+        skill.require_site_paths(parse(*figures))
+    skill.require_site_paths(parse(*figures, "--gtf", "x", "--spliceosome-list", "s",
+                                   "--broad-binders-list", "b"))
+    with pytest.raises(ValueError, match="released engine"):
+        skill.engine_root_of(parse(*BASE, *presplit))
+    assert skill.engine_root_of(parse(*BASE, *presplit, "--engine", "audited")) == ROOT
