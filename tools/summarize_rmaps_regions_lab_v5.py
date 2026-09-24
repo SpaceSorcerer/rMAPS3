@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Summarize rMAPS3 SE output with optional independent permutation refinement.
+"""SUPERSEDED - use tools/calibrate_ranksum_v2.py (the reported layer is the rank-sum statistic since 2026-09-20).
+
+Kept because tools/rank_stability.py imports its readers, and to reproduce the 2026-09-17 Fisher
+figures. Summarize rMAPS3 SE output with optional independent permutation refinement.
 
 For a pre-specified statistic, each fresh stage-2 plus-one estimate is a valid
 Monte Carlo p-value under label exchangeability. Selecting whether to report B1

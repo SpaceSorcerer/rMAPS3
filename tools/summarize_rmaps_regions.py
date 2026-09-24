@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Summarize fixed-engine rMAPS3 SE output and calibrate regional minima."""
+"""SUPERSEDED - use tools/calibrate_ranksum_v2.py (the reported layer is the rank-sum statistic since 2026-09-20).
+
+Summarize fixed-engine rMAPS3 SE output and calibrate regional minima: the audited-engine Fisher
+layer of 2026-09-16, still run by tools/rmaps3_lab_run.py.
+"""
 
 from __future__ import annotations
 

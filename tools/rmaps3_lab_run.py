@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run configured SE pre-splitting, chromosome normalization, mapping and calibration."""
+"""SUPERSEDED - use tools/rmaps3_skill_run.py (released engine, rank-sum layer, calibrated supplement).
+
+Run configured SE pre-splitting, chromosome normalization, mapping and calibration on the audited
+engine with the Fisher layer of 2026-09-16. rmaps3_skill_run.py still imports its coordinate
+normalisation (COORD_HEADER, normalize_coordinates).
+"""
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,6 @@
-"""Westfall-Young min-P calibration of the released rMAPS3 rank-sum statistic: v1, the ROW-UNIT
+"""SUPERSEDED - use tools/calibrate_ranksum_v2.py for the reportable p and q (row unit = sensitivity only).
+
+Westfall-Young min-P calibration of the released rMAPS3 rank-sum statistic: v1, the ROW-UNIT
 version, kept for SENSITIVITY ONLY (superseded 2026-09-22 by tools/calibrate_ranksum_v2.py).
 
 Duplicate target exons (rMATS rows sharing chr/strand/exonStart/exonEnd with different flanking
