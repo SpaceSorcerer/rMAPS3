@@ -1081,11 +1081,11 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                   "Dot colour = RBP-level calibrated BH q (min-P over the RBP's motifs)")
         colour += '; hue = direction, deeper as q falls; grey = q ≥ 0.05; key at right'
         lines = ['Stem height = −log10 calibrated p' + (' (RBP level)' if by_rbp else ''),
-                 'Layer: same statistic; p from label permutation over target-exon clusters (Westfall–Young, min over '
-                 'windows and, for the by-RBP figure,',
-                 "over the RBP's motifs, inside the permutation; B = "
-                 f'{refinement["stage1_permutations"]:,} refined to {refinement["stage2_permutations"]:,}); '
-                 f'BH q over {family}: these are the p and q to report',
+                 'Layer: same statistic; Westfall–Young label-permutation p over target-exon clusters, min over the '
+                 'windows' + (" and over the RBP's motifs" if by_rbp else '') + ', inside the permutation',
+                 f'Every calibrated p is a valid permutation p (B = {refinement["stage1_permutations"]:,}, or '
+                 f'{refinement["stage2_permutations"]:,} where refined; resolution 1/(B+1)); BH q over {family}, '
+                 'FDR under PRDS-type dependence: these are the p and q to report',
                  'null = exchangeability of changed target exons within the tested universe; ' + caveat,
                  *( [sensitivity] if sensitivity else [] ),
                  SIZE_SENTENCE, 'SIZE_KEY',

@@ -517,6 +517,16 @@ NULL_DESCRIPTION = (
     "their motif counts; exon covariates that track motif content, such as length, enter it.")
 
 
+def validity_sentence(report):
+    """The one inferential statement the README, LESSONS.md, the workbook, the readout and the legend share."""
+    return ("Every calibrated p is a valid permutation p: an unpromoted test keeps its stage-1 p (B = {:,}, "
+            "resolution 1/{:,}) and a promoted test takes its stage-2 p (B = {:,}, resolution 1/{:,}); "
+            "calib_perms_used gives each p's B. BH over valid p-values controls the FDR under PRDS-type "
+            "dependence, and mixed resolutions do not break that.".format(
+                report["stage1_permutations"], report["stage1_permutations"] + 1,
+                report["stage2_permutations"], report["stage2_permutations"] + 1))
+
+
 def readme_rows(report, alias_table, rowunit_root):
     shared = "; ".join("{} ({})".format(a["kmer"], a["carrier_keys"]) for a in report["duplicate_kmers"])
     return [
@@ -572,9 +582,17 @@ def readme_rows(report, alias_table, rowunit_root):
                    "RBP name."),
         ("Stages", "Stage 1 = {} permutations for every test; stage 2 = {} for a motif-direction pair with any "
                    "stage-1 p <= {}, and for an RBP-direction when any RBP-level statistic did or any of its "
-                   "motifs was promoted. Seed {}; independent stage streams. The p is super-uniform for "
-                   "p <= {}.".format(report["stage1_permutations"], report["stage2_permutations"],
-                                    report["refine_threshold"], report["seed"], report["refine_threshold"])),
+                   "motifs was promoted. Seed {}; independent stage streams.".format(
+                       report["stage1_permutations"], report["stage2_permutations"],
+                       report["refine_threshold"], report["seed"])),
+        ("Validity", validity_sentence(report)),
+        ("calib_perms_used / rbp_calib_perms_used", "The B behind each calibrated p: {:,} (stage 1, resolution "
+                                                    "1/{:,}) or {:,} (stage 2, resolution 1/{:,}). calib_stage "
+                                                    "says which.".format(
+                                                        report["stage1_permutations"],
+                                                        report["stage1_permutations"] + 1,
+                                                        report["stage2_permutations"],
+                                                        report["stage2_permutations"] + 1)),
         ("Floors", "Stage-2 floor 1/({} + 1). A p at the floor means no permutation reached the observed "
                    "statistic, not that the true p equals the floor.".format(report["stage2_permutations"])),
         ("Families", "No correction across arms; each arm is its own family at each level."),
@@ -656,11 +674,11 @@ def readout_lines(arm, condensed, report):
             "*_rowunit columns from " + report["rowunit_source"] if report["rowunit_source"] else "not computed"),
         "",
         "Stage 1: {} permutations, seed {}. Stage 2: {} permutations for {} unique motif-direction pairs and {} "
-        "RBP-directions ({} pairs run). The reported p is super-uniform for p <= {}; the largest calibrated p "
-        "among q<0.05 calls is {} (motif), {} (RBP min-P), {} (RBP max-z), {} (RBP mean-z).".format(
+        "RBP-directions ({} pairs run). {} The largest calibrated p among q<0.05 calls is {} (motif), {} (RBP "
+        "min-P), {} (RBP max-z), {} (RBP mean-z).".format(
             report["stage1_permutations"], report["seed"], report["stage2_permutations"],
             report["unique_pairs_promoted_motif_level"], report["rbp_directions_promoted"],
-            report["stage2_pairs_run"], report["refine_threshold"],
+            report["stage2_pairs_run"], validity_sentence(report),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["motif"]),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["rbp_minp"]),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["rbp_maxz"]),

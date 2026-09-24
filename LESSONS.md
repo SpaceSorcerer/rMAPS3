@@ -76,7 +76,13 @@ and 09-22 addenda. Dated facts keep their dates.
   - The RBP-level p is min-P over the RBP's motifs, inside the permutation. Max-z and mean-z are sensitivity columns only. Max-z penalises an RBP whose second motif has a heavier-tailed null.
   - Motif keys that share one k-mer are tested once, verified bit-identical and mapped back to every carrier. With the shipped motif tables, the motif BH family is 121 unique k-mers × 2 directions × 3 pooled regions = 726.
   - The row-unit v1 (`tools/calibrate_ranksum.py --permutation-unit row`) survives only as `*_rowunit` sensitivity columns.
-- **Adaptive refinement.** Stage-2 tests are chosen by their stage-1 p. Each stage-2 p is a valid Monte Carlo p, but the mixture carries no BH guarantee. Check that `max_calibrated_p_among_q_lt_0.05` in `refinement_report.json` lies inside the refined range, and say so wherever a q is quoted. A p at the floor 1/(B+1) means no permutation reached the statistic, so quote the rank.
+- **Two-stage validity (2026-09-24, v1.0.1).** Every calibrated p is a valid permutation p. An unpromoted test keeps its stage-1 p (B = 2,000, resolution 1/2,001); a promoted test takes its stage-2 p (B = 100,000, resolution 1/100,001). `calib_perms_used` gives each p's B. BH over valid p-values controls the FDR under PRDS-type dependence, and mixed resolutions do not break that. The two-stage design is unchanged.
+  - Each stage p is (1 + #{null ≥ observed}) / (1 + B) over independent uniform cluster draws, so each is marginally super-uniform. The stage streams are independent (`SeedSequence([seed, stage, direction])`).
+  - For α ≤ the refine threshold t, only promoted tests can reach α, so P(F ≤ α) ≤ P(S2 ≤ α) ≤ α (advisor proof, 2026-09-21, `E:maps_calib_mw\ADVISOR_calibrated_p_2026-09-21.md` section 3).
+  - For α > t, when promotion is decided by the test's own stage-1 p, {F ≤ α} lies inside {S1 ≤ α}, so P(F ≤ α) ≤ α.
+  - A pair can also be promoted through another statistic of the same pair or through its RBP. That branch is exact for α ≤ t. For α > t it is checked, not proven: `tests/test_two_stage_fdr.py` runs the real arm runner on all-null arms and asserts FDR ≤ nominal plus Monte Carlo margin and uniform p (KS).
+  - PRDS is assumed, not proven. Shared permutations within an arm and direction, overlapping k-mers and the shared background all induce positive dependence.
+  - A p at the floor 1/(B+1) means no permutation reached the statistic, so quote the rank. `refinement_report.json` keeps `max_calibrated_p_among_q_lt_0.05` as a record.
 - **Order survives calibration; significance does not.** On 2026-09-17 and 09-20:
   - BH is monotone and never reorders. The Westfall–Young calibration barely reorders: Spearman ≥ 0.98 in all 18 arm × panel comparisons.
   - Cells at q < 0.05 fell from the hundreds under BH on raw minima to tens per arm.
