@@ -982,7 +982,7 @@ def draw_colour_key(fig, layer, refinement, scale, legend_top=.198, q_floor=None
     ax.set_ylim(0, height_pt)
     ax.add_patch(Rectangle((0, 0), 1, 1, transform=ax.transAxes, facecolor='#FAFAFA', edgecolor='#AAAAAA',
                            lw=.7, clip_on=False))
-    ax.text(.04, height_pt - 16, ('Dot colour: raw rank-sum p' if raw else 'Dot colour: calibrated BH q'),
+    ax.text(.04, height_pt - 16, (RAW_KEY_TITLE if raw else 'Dot colour: calibrated BH q'),
             fontsize=14, va='center')
     x0, x1 = .30, .95
     grid = np.linspace(0.0, 1.0, 256)
@@ -1004,7 +1004,8 @@ def draw_colour_key(fig, layer, refinement, scale, legend_top=.198, q_floor=None
             fontsize=12)
     grey_y = 18
     ax.scatter([.07], [grey_y], s=140, marker='o', color=NS_GREY, edgecolor='#333333', linewidth=.7)
-    ax.text(.11, grey_y, f'{symbol} ≥ 0.05 (not significant)', fontsize=14, va='center')
+    ax.text(.11, grey_y, RAW_KEY_GREY if raw else f'{symbol} ≥ 0.05 (not significant)', fontsize=14,
+            va='center')
     return floor
 
 
@@ -1082,9 +1083,10 @@ def truncation_text(value):
     return f'−log10 p = {value:.1f}'
 
 
-def subtitle(layer, refinement, kind='byMotif'):
+def subtitle(layer, refinement, kind='byMotif', texts=None):
     if layer == 'released_ranksum_rawP':
-        return ("Authors' rMAPS3 (released code " + RELEASED_COMMIT + ", --stat-method " + STAT_METHOD + "): one-sided "
+        commit, stat_method = engine_of(texts)
+        return ("Authors' rMAPS3 (released code " + commit + ", --stat-method " + stat_method + "): one-sided "
                 "rank-sum on per-event motif hit counts,\nsmallest p over the 50-nt windows of each region; raw p, "
                 "no multiple-testing adjustment (none is part of the tool).\n"
                 "p comes from the tie-corrected normal approximation; the RBP ORDER is what this panel claims.")
@@ -1100,6 +1102,17 @@ def subtitle(layer, refinement, kind='byMotif'):
             "Supplement to the main figure: how much of the released rank-sum signal survives a permutation null.")
 
 
+RAW_KEY_TITLE = 'raw rank-sum p (released engine): ORDER ONLY'
+RAW_KEY_GREY = 'grey = p ≥ 0.05, not a significance claim'
+RAW_COLOUR_SENTENCE = RAW_KEY_TITLE + ' — ' + RAW_KEY_GREY
+
+
+def engine_of(texts):
+    """(commit, stat method) of the released run, as resolved from the command line or its defaults."""
+    texts = texts or {}
+    return texts.get('commit') or RELEASED_COMMIT, texts.get('stat_method') or STAT_METHOD
+
+
 SIZE_SENTENCE = ('Dot size = motif-score ratio (changed ÷ background, hits per event per window, from the '
                  "tool's own count tables)")
 
@@ -1109,13 +1122,14 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
     direction = (texts or {}).get('direction_text') or DEFAULT_DIRECTION_TEXT
     raw = layer == 'released_ranksum_rawP'
     if raw:
+        commit, stat_method = engine_of(texts)
         lines = ['Stem height = −log10 raw rank-sum p',
-                 "Layer: authors' released rMAPS3 " + RELEASED_COMMIT + ' with --stat-method ' + STAT_METHOD +
+                 "Layer: authors' released rMAPS3 " + commit + ' with --stat-method ' + stat_method +
                  ' — one-sided rank-sum on per-event motif hit counts, regional minimum over 50-nt windows, raw p',
                  'raw rank-sum p from the released tool: use for RBP ORDER only',
                  SIZE_SENTENCE, 'SIZE_KEY',
-                 'Dot colour = direction hue (included gold, skipped blue), deeper as raw rank-sum p falls '
-                 '(no multiple-testing adjustment); grey = p ≥ 0.05; key at right',
+                 'Dot colour = ' + RAW_COLOUR_SENTENCE + '; hue = direction (included gold, skipped blue), deeper '
+                 'as raw p falls, no multiple-testing adjustment; key at right',
                  direction,
                  'stems above the cap are truncated and labelled with their value']
     else:
@@ -1274,7 +1288,8 @@ def draw_figure(arm, layer, kind, panels, counts, refinement, scale, power, size
     warn = power is not None and not power['adequate']
     if warn:
         fig.text(.5, .950, power['label'], ha='center', va='top', fontsize=16, weight='bold', color='#D55E00')
-    fig.text(.5, .936 if warn else .946, subtitle(layer, refinement, kind), ha='center', va='top', fontsize=15)
+    fig.text(.5, .936 if warn else .946, subtitle(layer, refinement, kind, texts), ha='center', va='top',
+             fontsize=15)
     if kind == 'byMotif':
         fig.text(.5, .900 if warn else .908, "each dot is one motif; the motif sequences are in the arm's workbook",
                  ha='center', va='top', fontsize=15)
@@ -1437,7 +1452,7 @@ def _sheet(book, name, fields, rows, freeze='A2'):
     return sheet
 
 
-def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, dest):
+def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, dest, texts=None):
     """Ranks for every available v4 layer, joined to the archived v3.1 layer ranks."""
     v4_layers = [l for l in LAYERS if l in layer_panels]
     panels = sorted({key for l in v4_layers for key in layer_panels[l]})
@@ -1611,7 +1626,8 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                                     'exonStart, exonEnd), size-matched, so duplicate rMATS rows of one exon move '
                                     'together. Changed and background exons can differ in length; see the length-'
                                     'matched background sensitivity (--length-root) when it was run.'),
-        ('Layer 1 statistic', f"Released rMAPS3 at commit {RELEASED_COMMIT} run with --stat-method {STAT_METHOD}: a "
+        ('Layer 1 statistic', f"Released rMAPS3 at commit {engine_of(texts)[0]} run with --stat-method "
+                              f"{engine_of(texts)[1]}: a "
                               'one-sided Mann-Whitney rank-sum test on per-event motif hit counts, taking the smallest '
                               'p over the 50-nt windows of a region. Raw p; the tool applies no adjustment.'),
         ('Layer 2 statistic', f'The same statistic with a Westfall-Young min-P label-permutation p '
@@ -1631,8 +1647,8 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                            'min(targetExon-5prime, targetExon-3prime); Downstream Intron = min(downstreamIntron, '
                            'downstreamExonIntron). The two flanking-exon sub-regions are not plotted.'),
         ('Selection', 'One best motif per RBP per layer, panel and direction: smallest layer p, then enrichment ratio '
-                      'descending, then HGNC display label, then motif key. Released ratios do not exist and are held '
-                      'constant for tie ordering.'),
+                      'descending, then HGNC display label, then motif key. On the released layer the enrichment-ratio '
+                      'tie-breaker is held at 1.0, so its ties fall to the label; dot size there is still count_ratio.'),
         ('Tied ranks', 'scipy.stats.rankdata(method="average").'),
         ('Grouping', 'Table names are mapped to HGNC symbols with the supplied alias table and verified against '
                      'GENCODE v49 gene_name. The twelve synthetic ESRP-like hexamers form one ESRP-like group.'),
@@ -1665,7 +1681,8 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
 
 
 # ---------------------------------------------------------------- index
-def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_archive_name=None):
+def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_archive_name=None, texts=None):
+    commit, stat_method = engine_of(texts)
     parts = [f'<!doctype html><html lang="en"><meta charset="utf-8">'
              f'<title>rMAPS3 rank-sum motif maps (v{FIG_VERSION})</title>'
              '<style>body{font:16px Arial;margin:30px;line-height:1.5;max-width:1500px}'
@@ -1681,13 +1698,14 @@ def write_index(out, records, skipped, archive_name, author_maps_root=None, v41_
              'editable-text Arial SVG.</p>',
              '<h2>How to read</h2>',
              '<p class="main"><b>MAIN — Authors\u2019 rMAPS3 rank-sum, raw p.</b> The collaborators\u2019 released '
-             'rMAPS3 code at commit ' + RELEASED_COMMIT + ' run with <code>--stat-method ' + STAT_METHOD + '</code>: a '
+             'rMAPS3 code at commit ' + html.escape(commit) + ' run with <code>--stat-method ' + html.escape(stat_method)
+             + '</code>: a '
              'one-sided rank-sum test on per-event motif hit counts, reduced to the smallest p over the 50-nt windows '
-             'of each region. Stems and ranking are the raw p exactly as the tool reports it, colour hue is the '
-             'direction (included gold, skipped blue), deepening continuously as raw p falls from 0.05 to the y cap, '
-             'grey at p \u2265 0.05, and dots have constant size because the released tool '
-             'reports no enrichment ratio. No multiple-testing adjustment is applied, because none is part of the '
-             'tool. The p-values come from the tie-corrected normal approximation and are anti-conservative in the '
+             'of each region. Stems and ranking are the raw p exactly as the tool reports it. Colour: '
+             + html.escape(RAW_COLOUR_SENTENCE) + '; the hue is the direction (included gold, skipped blue), '
+             'deepening as raw p falls from 0.05 to the y cap. Dot size is the tool\u2019s motif-score ratio '
+             '(count_ratio), the same scale as the supplement. No multiple-testing adjustment is applied, because '
+             'none is part of the tool. The p-values come from the tie-corrected normal approximation and are anti-conservative in the '
              'sparse tail; the RBP order is the claim.</p>',
              '<p class="supp"><b>SUPPLEMENT — permutation-calibrated rank-sum (calibration v2).</b> The same '
              'statistic with its p recalibrated by Westfall\u2013Young label permutation over target-exon clusters '
@@ -1990,7 +2008,7 @@ def main(argv=None):
         v31_tsv = archive / arm / f'{arm}_rank_comparison.tsv'
         summaries, notes, has_methods = build_rank_comparison(
             arm, {l: select_panels(layers[l], l, 'byRBP', 10000) for l in layers},
-            v31_tsv if v31_tsv.is_file() else None, args.method_comparison, refinement, dest)
+            v31_tsv if v31_tsv.is_file() else None, args.method_comparison, refinement, dest, texts)
         rank_summary.extend(summaries)
         universe_rows.extend(notes)
         if v31_tsv.is_file():
@@ -2015,9 +2033,10 @@ def main(argv=None):
                 f'- Layers skipped for this arm: '
                 f'{", ".join(s["layer"] for s in skipped if s["arm"] == arm) or "none"}.',
                 side_gate,
-                f"- MAIN layer released_ranksum_rawP: authors' released rMAPS3 at commit {RELEASED_COMMIT}, "
-                f'--stat-method {STAT_METHOD}; raw regional-minimum p read verbatim from '
-                'pVal.{up,dn}.vs.bg.RNAmap.txt. No adjustment, no ratio, constant dot size.' + side_md5,
+                f"- MAIN layer released_ranksum_rawP: authors' released rMAPS3 at commit {engine_of(texts)[0]}, "
+                f'--stat-method {engine_of(texts)[1]}; raw regional-minimum p read verbatim from '
+                'pVal.{up,dn}.vs.bg.RNAmap.txt, no adjustment. Colour key: ' + RAW_COLOUR_SENTENCE + '. Dot size '
+                '= count_ratio, as on the supplement (next item).' + side_md5,
                 f'- Dot size on BOTH layers = count_ratio from {size_key["source"]} = fg_mean_count / '
                 'bg_mean_count, the released engine\'s own motif score (hits per event per 50-nt window, changed '
                 'events divided by background events; the counted unit is the rMATS SE row, not the distinct '
@@ -2138,7 +2157,7 @@ def main(argv=None):
                         'rank_summary': summaries,
                         'scales': scales, 'power': power})
         print(f'OK {arm}: layers={sorted(layers)} figures={len(selections)}', flush=True)
-    write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name)
+    write_index(out, records, skipped, args.archive_name, args.author_maps_root, args.v41_archive_name, texts)
     if controls:
         write_tsv(out / 'positive_control_audit.tsv', list(controls[0]), controls)
     write_tsv(out / 'selection_audit_v43.tsv', list(audits[0]), audits)

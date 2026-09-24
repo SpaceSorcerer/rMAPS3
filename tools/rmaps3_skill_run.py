@@ -750,8 +750,10 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     lists = {k: {aliases.get(s, s) for s in v} for k, v in lists.items()}
     counts, _ = lol.gate_counts(None, arm, None, out / "event_counts.json")
     engine_root = engine_root_of(args)
-    entries, _, n_motifs = lol.released_entries(arm, engine_out.parent, mappings,
-                                                git_revision(engine_root)[:7], args.stat_method)
+    commit = git_revision(engine_root)[:7]
+    texts = lol.resolve_texts(args)
+    texts.update(commit=commit, stat_method=args.stat_method)
+    entries, _, n_motifs = lol.released_entries(arm, engine_out.parent, mappings, commit, args.stat_method)
     exclusion_rows, dropped = lol.exclusion_audit(arm, entries, lists)
     lookup, size_key = lol.load_motif_scores(arm, score_root)
     lol.attach_scores(entries, lookup, arm)
@@ -780,7 +782,7 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
                                    "naming_action": r["_naming_action"]})
             stem = figures / figure_stem(arm, kind, variant)
             report = lol.draw_figure(arm, MAIN_LAYER, kind, panels, counts, None, scale, power,
-                                     size_key, stem, args, excluded=variant != "main")
+                                     size_key, stem, args, excluded=variant != "main", texts=texts)
             layouts.append(report)
             built += [Path(str(stem) + ".png"), Path(str(stem) + ".svg")]
     for path in built:
@@ -795,7 +797,7 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
         {"figure_version": lol.FIG_VERSION, "layer": MAIN_LAYER, "n_motifs": n_motifs,
          "y_scale": scale, "size_key": size_key, "dropped_in_noSpliceosome_noBroad": sorted(dropped),
          "figures": layouts}, indent=2, default=str) + "\n", encoding="utf-8")
-    result = {"figures": built, "score_table": score_table, "controls": [],
+    result = {"figures": built, "score_table": score_table, "controls": [], "commit": commit,
               "audits": [figures / n for n in ("selection_audit.tsv", "exclusion_audit.tsv",
                                                "naming_audit.tsv", "layout_report.json")]}
     if args.positive_control:
@@ -864,9 +866,11 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
     if figures is not None and figures.get("figures"):
         parts.append(
             "<h2>Main-layer region lollipops</h2>"
-            "<p><b>What they show:</b> the authors' released rMAPS3 rank-sum p, raw, exactly as the "
-            "root tables report it, reduced to the smallest p per pooled region. Stems are "
-            "−log10 p, dot colour bins the same raw p, dot size is the tool's own motif-score "
+            f"<p><b>What they show:</b> the authors' released rMAPS3 rank-sum p (engine commit "
+            f"{esc(figures.get('commit', 'unrecorded'))}, <code>--stat-method {esc(args.stat_method)}</code>), raw, "
+            "exactly as the root tables report it, reduced to the smallest p per pooled region. Stems are "
+            "−log10 p. Dot colour: raw rank-sum p (released engine): ORDER ONLY — grey = p ≥ 0.05, not a "
+            "significance claim. Dot size is the tool's own motif-score "
             "ratio (changed ÷ background hits per event per 50-nt window). Included panels rise, "
             "skipped panels hang down, all six share one y-scale, and the footer gives n events.</p>"
             "<p><b>What they do not show:</b> a calibrated p, a q-value or any multiple-testing "

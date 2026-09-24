@@ -121,6 +121,8 @@ and 09-22 addenda. Dated facts keep their dates.
   - Colour = direction hue: included is RBP-RELI gold `#E69F00`, skipped is RBP-RELI blue `#0072B2`.
   - The hue deepens with significance, from the 0.05 tint to the floor. The supplement uses the calibrated q, and its ramp ends at the smallest q observed in the arm for that family (4.3.1). The main layer uses the raw p, with the ramp ending at the y cap.
   - Values ≥ 0.05 are grey `#999999`.
+  - On the main layer the key and the legend read "raw rank-sum p (released engine): ORDER ONLY — grey = p ≥ 0.05, not a significance claim" (v1.0.1). "Not significant" appears on the supplement key only, where the value is a calibrated q.
+  - The engine commit and `--stat-method` in every subtitle, legend, sidecar, rank-workbook and index sentence come from `--released-commit` / `--released-stat-method` (the wrapper passes the verified checkout's commit), never from a constant.
   - In 4.3.2, adjacent key ticks differ by CIEDE2000 ≥ 15, and grey differs from the 0.05 tint by ≥ 20. Both are asserted at build time.
 - **Legend.** An on-figure legend and a one-line layer subtitle are mandatory.
   - The supplement subtitle: "these are the p and q to report".

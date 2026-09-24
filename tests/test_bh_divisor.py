@@ -17,12 +17,9 @@ import calibrate_ranksum as calib  # noqa: E402
 import synthetic_calibrated_arm as syn  # noqa: E402
 
 
-@pytest.fixture(scope="module")
-def arm(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("bh_divisor_arm")
-    inputs = syn.build(tmp)
-    inputs["figures"] = syn.draw(inputs, tmp / "figures")
-    return inputs
+@pytest.fixture
+def arm(calibrated_arm):
+    return calibrated_arm
 
 
 def test_bh_adjust_reports_the_divisor_it_used_and_leaves_nan_untouched():

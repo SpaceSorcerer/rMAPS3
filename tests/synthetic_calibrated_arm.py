@@ -23,6 +23,7 @@ SIZES = {"up": [1] * 16 + [2] * 2, "dn": [1] * 14 + [2] * 2, "bg": [1] * 180 + [
 OFFSETS = {"up": 10_000, "dn": 200_000, "bg": 1_000_000}
 COUNTS = {"n_up": 20, "n_dn": 18, "n_bg": 200, "n_expr_unknown_in_fg": 0, "n_expr_unknown_in_bg": 2}
 ALIAS = ROOT / "data" / "rbp_alias_hgnc_2026-09-17.tsv"
+COMMIT = "abc1234"  # not the builder default, so propagation into every text is visible
 
 
 def zero_motif(motifs):
@@ -34,7 +35,8 @@ def zero_motif(motifs):
                 and kmers.count(m.split(".", 1)[1]) == 1 and not m.startswith(("QKI.", "motif_")))
 
 
-def build(tmp_path: Path, b1=99, b2=499):
+def build(tmp_path: Path, b1=99, b2=499, commit=None):
+    commit = commit or COMMIT
     motifs = sorted(fork_motif_keys())
     zero = zero_motif(motifs)
     released, counts_root, calibrated = tmp_path / "released", tmp_path / "counts", tmp_path / "summary"
@@ -78,7 +80,7 @@ def build(tmp_path: Path, b1=99, b2=499):
             for motif in motifs:
                 h.write("\t".join([motif] + [repr(roots[d][motif][r]) for r in io.REGIONS]) + "\n")
     (released / f"{ARM}_command.log").write_text(
-        f"set={ARM} engine=released (synthetic @ b9a9dce) stat=mannwhitney\nexit=0 wall_s=1\n", encoding="utf-8")
+        f"set={ARM} engine=released (synthetic @ {commit}) stat=mannwhitney\nexit=0 wall_s=1\n", encoding="utf-8")
     counts_json = tmp_path / "counts.json"
     counts_json.write_text(json.dumps(COUNTS), encoding="utf-8")
     common = ["--arm", ARM, "--counts-root", str(counts_root), "--released-root", str(released),
@@ -106,5 +108,5 @@ def draw(arm_inputs, figures: Path, extra=()):
               "--calibrated-root", str(arm_inputs["calibrated"]), "--counts-json", f"{ARM}={arm_inputs['counts_json']}",
               "--alias-table", str(ALIAS), "--gtf", str(arm_inputs["gtf"]),
               "--spliceosome-list", str(arm_inputs["splice"]), "--broad-binders-list", str(arm_inputs["broad"]),
-              *extra])
+              "--released-commit", COMMIT, *extra])
     return figures
