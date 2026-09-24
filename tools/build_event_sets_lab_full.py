@@ -3,6 +3,7 @@
 # Functions/constants below copied verbatim from:
 # reli_v121/code/build_reli_foregrounds_v2.py of the frozen RBP-RELI ledger tree (--frozen-root)
 # source MD5: 32be07fd0e6e2edff5f077384f45b352
+# One deviation (2026-09-24): prepare() orientation 'agreement' excludes IncLevelDifference==0 ties.
 from __future__ import annotations
 
 import argparse
@@ -390,7 +391,11 @@ def prepare(args):
     orientation = dict(total=len(ledger), evaluable=int(evaluable.sum()),
                        unavailable=int((~evaluable).sum()), informative=int(informative.sum()),
                        agrees=int(agrees.sum()),
-                       agreement=float(agrees.sum() / evaluable.sum()) if evaluable.any() else 0,
+                       # Same tie fix as 4e5d717 (the one deviation from the frozen source): an
+                       # IncLevelDifference of exactly 0.000 is a tie, not a disagreement, so ties
+                       # leave BOTH denominators; a genuine orientation flip still trips the guard.
+                       agreement=float((agrees & informative).sum() / (evaluable & informative).sum())
+                       if (evaluable & informative).any() else 0,
                        informative_agreement=float((agrees & informative).sum() / informative.sum())
                        if informative.any() else 0)
     (args.outdir / "orientation.json").write_text(json.dumps(orientation, indent=2), encoding="utf-8")

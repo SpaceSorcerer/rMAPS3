@@ -101,8 +101,10 @@ and 09-22 addenda. Dated facts keep their dates.
 - **Rank stability (2026-09-17).** `tools/rank_stability.py` ran 300 foreground bootstraps with the background fixed, on the audited Fisher order. At about 100 to 600 events per direction, only the top 1 to 3 RBPs per panel reached top-10 frequency ≥ 0.8.
 - **Event sets.**
   - The lab gate is the RBP-RELI `reli_v121` ledger gate, a composite of four named parts: rMATS FDR, |dPSI|, IJC+SJC in every sample, and DESeq2 baseMean. Read the values off the ledger and the gate tree, never from memory.
-  - `tools/build_event_sets_lab_full.py` built the lab sets. Its byte-identical lab copy is at `git show 0ecf0cc:tools/build_event_sets_lab_full.py`. It keeps the frozen `reli_v121` orientation assertion verbatim, so exact `IncLevelDifference == 0` ties count against agreement.
-  - The portable `tools/build_event_sets.py` excludes those ties from both denominators (`4e5d717`, 2026-09-22). Ties grow with cohort size, not with data quality.
+  - `tools/build_event_sets_lab_full.py` built the lab sets. Its byte-identical lab copy is at `git show 0ecf0cc:tools/build_event_sets_lab_full.py`.
+  - Both builders exclude exact `IncLevelDifference == 0` ties from both orientation-agreement denominators. The portable builder got this in `4e5d717` (2026-09-22) and the lab builder on 2026-09-24, its one deviation from the frozen `reli_v121` source. Ties grow with cohort size, not with data quality.
+  - The frozen dissertation sets are unaffected. Event selection never depended on this ratio. Their recorded `informative_agreement` was 1.0 in all three arms, so a rebuild would only raise the recorded `agreement` (0.961 MIAT_KD, 0.981 MIAT_OE, 0.980 QKI_KO in `E:\rmaps_work\logs\<ARM>\orientation.json`) to 1.0.
+  - The frozen RBP-RELI source `build_reli_foregrounds_v2.py` still carries the old formula. RBP-RELI is a shared engine and was not changed here.
 
 ## 4. Figures (version 4.3.2)
 
