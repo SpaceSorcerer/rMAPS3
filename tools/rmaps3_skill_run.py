@@ -815,8 +815,19 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
 
 
 # ------------------------------------------------------------------ index page
+def missing_deliverables(args, conversion, figures) -> list:
+    """What the mode promised but the run did not produce: verified archives, and figures unless
+    --no-figures was given."""
+    missing = []
+    if not conversion.get("verified"):
+        missing.append("verified count archives: " + (conversion.get("reason") or "verification did not run"))
+    if figures_wanted(args) and not (figures or {}).get("figures"):
+        missing.append("main-layer figures: " + ((figures or {}).get("skipped") or "not drawn"))
+    return missing
+
+
 def write_index(args, out: Path, engine_out: Path, counts, controls, conversion, extras,
-                figures=None) -> Path:
+                figures=None, missing=None) -> Path:
     import html as html_mod
 
     def esc(value):
@@ -840,6 +851,8 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
         f"<p>Mode <b>{esc(args.mode)}</b>; engine <b>{esc(args.engine)}</b>; statistic "
         f"<b>{esc(args.stat_method)}</b>; {esc(args.species)} / {esc(args.genome)}; SE events only.</p>",
         f"<p><b>{esc(STAT_CAVEATS[args.stat_method])}</b></p>",
+        *([f'<p style="color:#D55E00"><b>{"PARTIAL (--allow-partial)" if args.allow_partial else "INCOMPLETE"}'
+           f" run. Missing: {esc('; '.join(missing))}</b></p>"] if missing else []),
         "<h2>Event sets</h2><table><tr><th>set</th><th>n events</th><th>file</th></tr>",
     ]
     for key, label in (("up", "changed, more included"), ("dn", "changed, more skipped"),
@@ -1073,6 +1086,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "n_expr_unknown_in_fg/bg); its event counts must match the inputs")
     p.add_argument("--no-figures", action="store_true",
                    help="quick mode: skip the main-layer region lollipops")
+    p.add_argument("--allow-partial", action="store_true",
+                   help="exit 0 with status complete_partial when the verified count archives or the promised "
+                        "figures are missing; without it such a run exits 4 with status INCOMPLETE")
     p.add_argument("--arm-label", default=None, help="figure title for an arm the builder does not name")
     # full mode
     p.add_argument("--calib-unit", choices=("cluster",), default="cluster",
@@ -1270,18 +1286,27 @@ def main(argv=None) -> int:
             else:
                 figures = build_quick_figures(args, out, engine_out, roots, root_motifs, scores,
                                               alias, known, additional, log)
-        write_index(args, out, engine_out, counts, controls, conversion, extras, figures)
+        missing = missing_deliverables(args, conversion, figures)
+        write_index(args, out, engine_out, counts, controls, conversion, extras, figures, missing)
         figure_controls = (figures or {}).get("controls", [])
         manifest.update(status="complete", engine_wall_seconds=wall,
                         n_motifs=len(motifs), conversion=conversion,
                         positive_control=controls, figure_positive_control=figure_controls,
                         figures=[str(p) for p in (figures or {}).get("figures", [])],
                         figures_skipped=(figures or {}).get("skipped"),
-                        event_counts={k: counts[k]["n_events"] for k in counts})
+                        event_counts={k: counts[k]["n_events"] for k in counts}, missing=missing)
         checks = controls + figure_controls
         if checks and not all(row["pass"] for row in checks) and not args.positive_control_advisory:
             manifest["status"] = "complete_with_failed_positive_control"
             exit_code = 3
+        if missing:
+            for item in missing:
+                log("MISSING " + item)
+            if args.allow_partial:
+                manifest["status"] = "complete_partial"
+            else:
+                manifest["status"] = "INCOMPLETE"
+                exit_code = 4
     except Exception as exc:  # recorded, then re-raised through the exit code
         manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         log(f"FAILED {type(exc).__name__}: {exc}")

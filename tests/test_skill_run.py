@@ -377,10 +377,10 @@ def test_quick_mode_runs_end_to_end_on_the_synthetic_genome(synthetic, tmp_path)
                         "--stat-method", "fisher", "--known-motifs", str(motifs),
                         "--additional-motifs", "NA", "--alias-table", str(alias),
                         "--window", "4", "--step", "2", "--intron", "20", "--exon", "10",
-                        "--workers", "1", "--blas-threads", "1"], tmp_path)
+                        "--workers", "1", "--blas-threads", "1", "--allow-partial"], tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = json.loads((out / "run_manifest.json").read_text())
-    assert manifest["status"] == "complete"
+    assert manifest["status"] == "complete_partial"
     assert manifest["event_counts"] == {"up": 1, "dn": 1, "bg": 1}
     for name in ("quick_summary.xlsx", "index.html", "command.log", "versions.txt", "md5.txt"):
         assert (out / name).is_file() and (out / name).stat().st_size > 0, name

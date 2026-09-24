@@ -175,7 +175,7 @@ and `tools/rmaps3_lab_run.py` remain for reproduction.
 (CANONICAL / SENSITIVITY / SUPERSEDED). Two lab skills wrap
 [`tools/rmaps3_skill_run.py`](tools/rmaps3_skill_run.py):
 
-- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`.
+- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`. A run that lacks the verified archives, or the figures when `--no-figures` was not given, exits 4 with status `INCOMPLETE` in `run_manifest.json`; `--allow-partial` records it as `complete_partial` and exits 0.
 - **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.2 figures of both layers and the rank workbook.
 
 The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
