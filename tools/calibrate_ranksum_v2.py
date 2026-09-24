@@ -109,21 +109,60 @@ def native_region_summary(model, roots, carrier_keys, direction, emit_positions,
     return argmin, effect, region_p
 
 
-def load_rowunit(args, motifs, rbps):
-    """The row-unit sensitivity tables, or empty maps when --rowunit-root was not given."""
+def load_rowunit(args, motifs, rbps, counts_dir=None):
+    """The row-unit sensitivity tables, or empty maps when --rowunit-root was not given.
+
+    Hard errors unless: the (motif, direction, region) and (RBP, direction, pooled region) keys equal
+    this run's axes exactly, with no duplicate row; every row and refinement_report.json record the
+    permutation unit 'row'; and input_md5s.tsv records, for every count archive this run reads, the
+    same md5, so both layers were computed from the same archives.
+    """
     if not args.rowunit_root:
-        return {}, {}, None
+        return {}, {}, None, {}
     base = Path(args.rowunit_root) / args.arm
-    a_motif = {(r["motif_key"], r["direction"], r["region"]): r
-               for r in lib.read_tsv(base / "per_motif_regions.tsv")}
-    a_cond = {(r["RBP"], r["direction"], r["pooled_region"]): r
-              for r in lib.read_tsv(base / "condensed_per_rbp.tsv")}
-    if len(a_motif) != len(motifs) * 2 * len(io.REGIONS) or len(a_cond) != len(rbps) * 2 * len(POOLS):
-        raise ValueError("row-unit tables in {} do not match the motif / RBP axes".format(base))
-    units = {r.get("permutation_unit") for r in a_motif.values()}
-    if units - {"row", None}:
-        raise ValueError("--rowunit-root holds a non-row permutation unit: {}".format(sorted(units)))
-    return a_motif, a_cond, base
+    counts_dir = Path(counts_dir) if counts_dir is not None else Path(args.counts_root) / args.arm
+    required = [base / n for n in ("per_motif_regions.tsv", "condensed_per_rbp.tsv", "refinement_report.json",
+                                   "input_md5s.tsv")]
+    missing = [str(p) for p in required if not p.is_file()]
+    if missing:
+        raise ValueError("row-unit provenance incomplete, missing: " + ", ".join(missing))
+    motif_rows = lib.read_tsv(base / "per_motif_regions.tsv")
+    cond_rows = lib.read_tsv(base / "condensed_per_rbp.tsv")
+    a_motif = {(r["motif_key"], r["direction"], r["region"]): r for r in motif_rows}
+    a_cond = {(r["RBP"], r["direction"], r["pooled_region"]): r for r in cond_rows}
+    motif_axis = {(m, d, r) for m in motifs for d in ("up", "dn") for r in io.REGIONS}
+    rbp_axis = {(b, d, p) for b in rbps for d in ("up", "dn") for p in POOLS}
+    if len(a_motif) != len(motif_rows) or set(a_motif) != motif_axis:
+        raise ValueError("row-unit per_motif_regions.tsv in {} does not carry exactly this run's (motif, direction, "
+                         "region) keys: {} missing, {} extra, {} duplicate rows".format(
+                             base, len(motif_axis - set(a_motif)), len(set(a_motif) - motif_axis),
+                             len(motif_rows) - len(a_motif)))
+    if len(a_cond) != len(cond_rows) or set(a_cond) != rbp_axis:
+        raise ValueError("row-unit condensed_per_rbp.tsv in {} does not carry exactly this run's (RBP, direction, "
+                         "pooled region) keys: {} missing, {} extra, {} duplicate rows".format(
+                             base, len(rbp_axis - set(a_cond)), len(set(a_cond) - rbp_axis),
+                             len(cond_rows) - len(a_cond)))
+    units = {r.get("permutation_unit") for r in motif_rows}
+    if units != {"row"}:
+        raise ValueError("row-unit tables in {} must record permutation_unit 'row' on every row; found {}".format(
+            base, sorted(str(u) for u in units)))
+    report_unit = json.loads((base / "refinement_report.json").read_text(encoding="utf-8")).get("permutation_unit")
+    if report_unit != "row":
+        raise ValueError("row-unit refinement_report.json in {} records permutation_unit {!r}, not 'row'".format(
+            base, report_unit))
+    recorded = {Path(r["path"].replace("\\", "/")).name: r["md5"] for r in lib.read_tsv(base / "input_md5s.tsv")}
+    mismatched = []
+    for motif in motifs:
+        name = motif + ".counts.npz"
+        if recorded.get(name) != io.md5(counts_dir / name):
+            mismatched.append(name)
+    if mismatched:
+        raise ValueError("row-unit input_md5s.tsv in {} does not record this run's count archives ({} absent or "
+                         "different, e.g. {})".format(base, len(mismatched), mismatched[0]))
+    provenance = {"rowunit_permutation_unit": "row", "rowunit_archives_md5_matched": len(motifs),
+                  "rowunit_tables_md5": {n: io.md5(base / n) for n in ("per_motif_regions.tsv",
+                                                                      "condensed_per_rbp.tsv")}}
+    return a_motif, a_cond, base, provenance
 
 
 def run_arm(args, emit):
@@ -155,7 +194,7 @@ def run_arm(args, emit):
                                      len(motifs) - len(kmers)))
     rbp_kmers = lib.rbp_unique_kmers(motifs, alias)
     rbps = sorted(rbp_kmers)
-    a_motif, a_cond, rowunit_dir = load_rowunit(args, motifs, rbps)
+    a_motif, a_cond, rowunit_dir, rowunit_provenance = load_rowunit(args, motifs, rbps, counts_dir)
 
     drawers = {d: lib.ClusterDrawer(keys[d], keys["bg"]) for d in ("up", "dn")}
     for d in ("up", "dn"):
@@ -469,6 +508,7 @@ def run_arm(args, emit):
             "rbp_minp": max([rbp_final[k]["p_minp"] for k in rbp_family if rbp_q["minp"][k] < 0.05],
                             default=None)},
         "rowunit_source": str(rowunit_dir) if rowunit_dir else None,
+        **rowunit_provenance,
         "duplicate_kmers": dup_audit,
         "arm_wall_seconds_before_writing": time.perf_counter() - started_arm,
     }
