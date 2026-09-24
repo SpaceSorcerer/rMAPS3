@@ -203,8 +203,11 @@ python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO
 ```
 
 `--rmats-se SE.MATS.JC.txt --filter gates.json` replaces the three set flags and
-`--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`. The output root
-must be absent or empty.
+`--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`, which implements
+rule A only, so raw input needs an arm named `<NAME>_A`. The wrapper refuses raw input for an arm
+whose suffix names rule B or Beffect: rule B sets are frozen concordant files, supplied pre-split.
+`--gate-rule` states the rule explicitly and must equal the arm suffix. The output root must be
+absent or empty.
 
 The same chain, step by step, reads and writes explicit roots:
 

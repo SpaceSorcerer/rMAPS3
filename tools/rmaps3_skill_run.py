@@ -55,6 +55,8 @@ STAT_CAVEATS = {
                     "continuity correction. With almost every eligible exon carrying no hit it is "
                     "severely anti-conservative: report the RBP ORDER, not the p as a p."),
 }
+GATE_RULES = ("A", "B", "Beffect")
+RULE_B_SUFFIXES = ("B", "Beffect")
 BLAS_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
 FILTER_ALIASES = {
@@ -170,6 +172,9 @@ def build_event_sets(args, out: Path, log: Logger, env: dict) -> Path:
                          f"{sorted(set(FILTER_ALIASES) | {'expr_table'})}")
     if gates.get("base_mean_floor") is not None and expr_table is None:
         raise ValueError("base_mean_floor needs expr_table (a DESeq2 table with gene_id, baseMean)")
+    if gates.get("rule", "A") != "A":
+        raise ValueError("the filter spec asks for rule {}; the portable builder implements rule A only. "
+                         "Rule B sets are frozen concordant files: supply pre-split inputs".format(gates["rule"]))
     config = {"arm": args.arm,
               "inputs": {"rmats_se": str(Path(args.rmats_se).resolve())},
               "gates": gates}
@@ -974,6 +979,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--up")
     p.add_argument("--dn")
     p.add_argument("--bg")
+    p.add_argument("--gate-rule", choices=GATE_RULES, default=None,
+                   help="event-set rule the inputs were built under; must equal the arm suffix. Raw "
+                        "--rmats-se input is split by the portable rule-A builder, so it takes rule A only")
     p.add_argument("--genome-root", default=None,
                    help="required: directory holding <genome>/<genome>.fa and its .fai")
     p.add_argument("--genome", default="hg38", help="FASTA build directory name, e.g. hg38 or mm10")
@@ -1065,6 +1073,7 @@ def validate(args) -> None:
                          "record <event_sets>/<ARM>/<gate>_rule<R>/counts.json) or --no-figures")
     if args.gate_counts and not presplit:
         raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
+    check_gate_rule(args, from_rmats)
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
                 "refine_perms", "bootstraps", "top_n"):
         if getattr(args, key) < 1:
@@ -1074,6 +1083,27 @@ def validate(args) -> None:
         print(f"MOUSE REFERENCE IN PLAY: genome={args.genome} species={args.species}. "
               "Do not merge or compare this run with a human arm.", file=sys.stderr)
         print("*" * 78, file=sys.stderr)
+
+
+def arm_rule(arm: str):
+    """The rule the figure builder reads from the arm name: the text after the last '_', or None."""
+    return arm.rsplit("_", 1)[1] if "_" in arm else None
+
+
+def check_gate_rule(args, from_rmats: bool) -> None:
+    """The effective gate rule must agree with the arm name, so no set is labelled with a rule it
+    was not built under. Raw rMATS input only ever goes through the portable rule-A builder."""
+    suffix = arm_rule(args.arm)
+    if from_rmats and suffix in RULE_B_SUFFIXES:
+        raise ValueError(f"arm {args.arm} names rule {suffix}, but --rmats-se input is split by the portable "
+                         "rule-A builder. Rule B sets are frozen concordant files: supply pre-split inputs "
+                         "(--up/--dn/--bg with --gate-counts) built under rule B")
+    if from_rmats and args.gate_rule not in (None, "A"):
+        raise ValueError(f"--gate-rule {args.gate_rule} with --rmats-se: the portable builder implements rule A "
+                         "only. Rule B sets are frozen concordant files: supply pre-split inputs")
+    if args.gate_rule is not None and suffix != args.gate_rule:
+        raise ValueError(f"--gate-rule {args.gate_rule} disagrees with the arm name {args.arm} (rule "
+                         f"{suffix}); name the arm <NAME>_{args.gate_rule}")
 
 
 def require_site_paths(args) -> None:
@@ -1113,6 +1143,7 @@ def main(argv=None) -> int:
                 "command": subprocess.list2cmdline(sys.orig_argv),
                 "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
                 "wrapper_md5": md5(Path(__file__).resolve()),
+                "effective_gate_rule": "A" if args.rmats_se else (args.gate_rule or arm_rule(args.arm)),
                 "fork_revision": git_revision(ROOT), "versions": versions(), "steps": []}
     (out / "versions.txt").write_text(
         "\n".join(f"{k}\t{v}" for k, v in manifest["versions"].items())
