@@ -472,7 +472,9 @@ def load_rbp_level(table, arm):
                   '_rbp_q_minp': _num(r.get('rbp_calibrated_q_minp')),
                   '_rbp_q_maxz': _num(r.get('rbp_calibrated_q_maxz')),
                   '_rbp_q_meanz': _num(r.get('rbp_calibrated_q_meanz')),
-                  '_rbp_perms': int(r['rbp_calib_perms_used']), '_rbp_stage': r['rbp_calib_stage'],
+                  # v1.0.1b: each RBP-level statistic carries its own stage; min-P uses the unsuffixed pair.
+                  '_rbp_perms': int(r.get(f'rbp_calib_perms_used_{name}') or r['rbp_calib_perms_used']),
+                  '_rbp_stage': r.get(f'rbp_calib_stage_{name}') or r['rbp_calib_stage'],
                   '_rbp_selected_motif': r['selected_motif_key'],
                   '_n_target_exons': (int(r['n_changed_included_target_exons']),
                                       int(r['n_changed_skipped_target_exons']))}

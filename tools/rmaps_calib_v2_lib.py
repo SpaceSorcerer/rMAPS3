@@ -145,6 +145,19 @@ def permutation_p(observed: float, null: np.ndarray) -> float:
     return (1 + int(np.sum(null[finite] >= observed))) / (1 + null.shape[0])
 
 
+def two_stage_p(p1: float, p2, threshold: float):
+    """(reported p, stage) of ONE test under self-triggered promotion.
+
+    The test reports its stage-2 p only when its OWN stage-1 p is <= threshold and a stage-2 p exists
+    for it; otherwise it reports its stage-1 p. Stage-2 draws run because another test of the same
+    pair or RBP was promoted never change this test's p. Then P(p <= a) <= a for every a, whatever the
+    joint law of the two stage p-values (docs/two_stage_validity.md).
+    """
+    if p2 is not None and math.isfinite(p1) and p1 <= threshold:
+        return p2, 2
+    return p1, 1
+
+
 def rbp_combine(observed: np.ndarray, null: np.ndarray):
     """Max and mean over motifs, computed on observed and null columns alike.
 

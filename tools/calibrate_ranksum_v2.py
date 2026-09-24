@@ -41,6 +41,8 @@ POOLS = tuple(io.POOL_TO_REGIONS)
 PERMUTATION_UNIT = "target-exon cluster (chr, strand, exonStart, exonEnd), size-matched"
 ADEQUATE_LABEL = "adequate"
 IDENTITY_FIELDS = {"motif"}
+PROMOTION_RULE = ("self-triggered: each test (motif-level, RBP min-P, max-z, mean-z) reports its stage-2 p only "
+                  "when its own stage-1 p <= refine_threshold; otherwise its stage-1 p")
 
 
 def power_label(arm, underpowered, n_inc, n_skip, t_inc, t_skip):
@@ -250,26 +252,24 @@ def run_arm(args, emit):
         return any(math.isfinite(v["calibrated_p"]) and v["calibrated_p"] <= threshold
                    for v in stage1[(k, d)].values())
 
+    # Stage-2 draws run for every pair holding a motif-level test, and every RBP-direction holding an
+    # RBP-level test, whose OWN stage-1 p <= threshold; each test still reports its stage-2 p only when
+    # its own stage-1 p <= threshold (lib.two_stage_p). A promoted neighbour never switches a test.
     motif_promoted = {(k, d) for k in kmers for d in ("up", "dn") if promoted_motif(k, d)}
-    rbp_promoted = set()
-    for rbp in rbps:
-        for d in ("up", "dn"):
-            own = any(math.isfinite(rbp_p1[(rbp, d, pool)][s]) and rbp_p1[(rbp, d, pool)][s] <= threshold
-                      for pool in POOLS for s in ("max", "mean", "minp"))
-            via_motif = any((k, d) in motif_promoted for k in rbp_kmers[rbp])
-            if own or via_motif:
-                rbp_promoted.add((rbp, d))
+    rbp_promoted = {(rbp, d) for rbp in rbps for d in ("up", "dn")
+                    if any(math.isfinite(rbp_p1[(rbp, d, pool)][s]) and rbp_p1[(rbp, d, pool)][s] <= threshold
+                           for pool in POOLS for s in ("max", "mean", "minp"))}
     rbp_needed = {(k, d) for rbp, d in rbp_promoted for k in rbp_kmers[rbp]}
     needed = sorted(motif_promoted | rbp_needed)
-    emit("stage 2 [{}]: {} of {} unique motif-direction pairs promoted at motif level; "
-         "{} of {} RBP-directions promoted; {} pairs to run".format(
+    emit("stage 2 [{}]: {} of {} unique motif-direction pairs hold a self-triggered motif-level test; "
+         "{} of {} RBP-directions hold a self-triggered RBP-level test; {} pairs to run".format(
              arm, len(motif_promoted), len(stage1), len(rbp_promoted), len(rbps) * 2, len(needed)))
     if args.stage1_only:
         emit("stage 2 SKIPPED by --stage1-only")
         motif_promoted, rbp_promoted, needed = set(), set(), []
 
     final = {k: {n: dict(v) for n, v in r.items()} for k, r in stage1.items()}
-    motif_stage = {k: 1 for k in stage1}
+    motif_stage = {(k, d, name): 1 for (k, d), r in stage1.items() for name in r}
     null2 = {}
     stage2_started = time.perf_counter()
     for d in ("up", "dn"):
@@ -288,9 +288,12 @@ def run_arm(args, emit):
                 if math.isfinite(result[name]["observed_max_z"]) and abs(
                         result[name]["observed_max_z"] - stage1[(kmer, d)][name]["observed_max_z"]) > 1e-9:
                     raise ValueError("observed statistic changed during refinement")
-            if (kmer, d) in motif_promoted:
-                final[(kmer, d)] = result
-                motif_stage[(kmer, d)] = 2
+            for name in masks:
+                _, stage = lib.two_stage_p(stage1[(kmer, d)][name]["calibrated_p"],
+                                           result[name]["calibrated_p"], threshold)
+                if stage == 2:
+                    final[(kmer, d)][name] = result[name]
+                    motif_stage[(kmer, d, name)] = 2
             if (kmer, d) in rbp_needed:
                 null2[(kmer, d)] = {pool: maxima[pool] for pool in POOLS}
             del model
@@ -304,19 +307,22 @@ def run_arm(args, emit):
     for rbp in rbps:
         for d in ("up", "dn"):
             for pool in POOLS:
-                entry = {"p_max": rbp_p1[(rbp, d, pool)]["max"], "p_mean": rbp_p1[(rbp, d, pool)]["mean"],
-                         "p_minp": rbp_p1[(rbp, d, pool)]["minp"],
-                         "minp_kmer": rbp_p1[(rbp, d, pool)]["minp_kmer"],
-                         "perms": stage1_perms, "stage": 1}
+                first, second = rbp_p1[(rbp, d, pool)], None
                 if (rbp, d) in rbp_promoted:
                     observed = np.asarray([stage1[(k, d)][pool]["observed_max_z"] for k in rbp_kmers[rbp]])
                     null = np.vstack([null2[(k, d)][pool] for k in rbp_kmers[rbp]])
                     o_max, n_max, o_mean, n_mean, _ = lib.rbp_combine(observed, null)
                     p_minp, arg_minp = lib.rbp_minp(observed, null)
-                    entry = {"p_max": lib.permutation_p(o_max, n_max),
-                             "p_mean": lib.permutation_p(o_mean, n_mean), "p_minp": p_minp,
-                             "minp_kmer": rbp_kmers[rbp][arg_minp] if arg_minp is not None else None,
-                             "perms": stage2_perms, "stage": 2}
+                    second = {"max": lib.permutation_p(o_max, n_max), "mean": lib.permutation_p(o_mean, n_mean),
+                              "minp": p_minp,
+                              "minp_kmer": rbp_kmers[rbp][arg_minp] if arg_minp is not None else None}
+                entry = {}
+                for s in ("max", "mean", "minp"):
+                    p, stage = lib.two_stage_p(first[s], None if second is None else second[s], threshold)
+                    entry.update({"p_" + s: p, "stage_" + s: stage,
+                                  "perms_" + s: stage2_perms if stage == 2 else stage1_perms})
+                entry["minp_kmer"] = (second if entry["stage_minp"] == 2 else first)["minp_kmer"]
+                entry["perms"], entry["stage"] = entry["perms_minp"], entry["stage_minp"]
                 rbp_final[(rbp, d, pool)] = entry
     del null2
 
@@ -359,13 +365,13 @@ def run_arm(args, emit):
                     "native_ranksum_p": roots[d][key][region],
                     "native_argmin_position": int(m["argmin"][region]),
                     "calib_observed_min_p": stat["observed_min_p"], "calibrated_p": stat["calibrated_p"],
-                    "calib_perms_used": stat["permutations"], "calib_stage": motif_stage[(kmer, d)],
+                    "calib_perms_used": stat["permutations"], "calib_stage": motif_stage[(kmer, d, region)],
                     "calib_reason": stat["reason"],
                     "native_ranksum_p_pooled": min(roots[d][key][r] for r in io.POOL_TO_REGIONS[pool]),
                     "calib_observed_min_p_pooled": pooled["observed_min_p"],
                     "calibrated_p_pooled": pooled["calibrated_p"],
                     "calib_perms_used_pooled": pooled["permutations"],
-                    "calib_stage_pooled": motif_stage[(kmer, d)], "calib_pooled_reason": pooled["reason"],
+                    "calib_stage_pooled": motif_stage[(kmer, d, pool)], "calib_pooled_reason": pooled["reason"],
                     "n_fg_exons": m["n1"], "n_bg_exons": m["n0"],
                     "n_fg_target_exons": n_target[d], "n_bg_target_exons": n_target["bg"],
                     "calibrated_q": motif_q.get((kmer, d, pool), math.nan),
@@ -415,7 +421,7 @@ def run_arm(args, emit):
                     "calibrated_q": motif_q.get((kmer, d, pool), math.nan),
                     "untestable": not math.isfinite(final[(kmer, d)][pool]["calibrated_p"]),
                     "calib_perms_used": final[(kmer, d)][pool]["permutations"],
-                    "calib_stage": motif_stage[(kmer, d)],
+                    "calib_stage": motif_stage[(kmer, d, pool)],
                     "native_argmin_position": effect_row["native_argmin_position"],
                     "n_motifs_total": len(rbp_keys), "n_unique_motifs": len(rbp_kmers[rbp]),
                     "n_motifs_calib_q_lt_0.05": sum(
@@ -436,6 +442,8 @@ def run_arm(args, emit):
                     "rbp_observed_mean_z": obs["mean"], "rbp_calibrated_p_meanz": fin["p_mean"],
                     "rbp_calibrated_q_meanz": rbp_q["mean"].get((rbp, d, pool), math.nan),
                     "rbp_calib_perms_used": fin["perms"], "rbp_calib_stage": fin["stage"],
+                    "rbp_calib_perms_used_maxz": fin["perms_max"], "rbp_calib_stage_maxz": fin["stage_max"],
+                    "rbp_calib_perms_used_meanz": fin["perms_mean"], "rbp_calib_stage_meanz": fin["stage_mean"],
                     "selected_motif_key_rowunit": a_row.get("selected_motif_key", "NA"),
                     "calibrated_p_rowunit": lib.as_float(a_row.get("calibrated_p")),
                     "calibrated_q_rowunit": lib.as_float(a_row.get("calibrated_q")),
@@ -491,6 +499,12 @@ def run_arm(args, emit):
                                  "meanz": len(rbp_family) - rbp_divisor["mean"]},
         "unique_pairs_total": len(stage1), "unique_pairs_promoted_motif_level": len(motif_promoted),
         "rbp_directions_promoted": len(rbp_promoted), "stage2_pairs_run": len(needed),
+        "promotion_rule": PROMOTION_RULE,
+        "motif_tests_reporting_stage2": sum(1 for s in motif_stage.values() if s == 2),
+        "motif_family_tests_reporting_stage2": sum(1 for k, d, p in motif_family if motif_stage[(k, d, p)] == 2),
+        "rbp_family_tests_reporting_stage2": {
+            label: sum(1 for k in rbp_family if rbp_final[k]["stage_" + s] == 2)
+            for s, label in (("minp", "minp"), ("max", "maxz"), ("mean", "meanz"))},
         "stage1_wall_seconds": stage1_seconds, "stage2_wall_seconds": stage2_seconds,
         "cluster_sizes": {d: drawers[d].need for d in drawers},
         "events": n_rows, "target_exons": n_target,
@@ -542,7 +556,8 @@ CONDENSED_COLUMNS = [
     "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_untestable", "rbp_minp_motif_key",
     "rbp_observed_max_z", "rbp_max_z_motif_key", "rbp_calibrated_p_maxz", "rbp_calibrated_q_maxz",
     "rbp_observed_mean_z", "rbp_calibrated_p_meanz", "rbp_calibrated_q_meanz",
-    "rbp_calib_perms_used", "rbp_calib_stage",
+    "rbp_calib_perms_used", "rbp_calib_stage", "rbp_calib_perms_used_maxz", "rbp_calib_stage_maxz",
+    "rbp_calib_perms_used_meanz", "rbp_calib_stage_meanz",
     "selected_motif_key_rowunit", "calibrated_p_rowunit", "calibrated_q_rowunit",
     "rank_motif_level", "rank_rbp_minp", "rank_rbp_maxz", "rank_rbp_meanz", "rank_motif_level_rowunit",
 ]
@@ -554,7 +569,8 @@ RBP_LEVEL_COLUMNS = [
     "rbp_calibrated_p_minp", "rbp_calibrated_q_minp", "rbp_untestable", "rbp_minp_motif_key", "rank_rbp_minp",
     "rbp_observed_max_z", "rbp_max_z_motif_key", "rbp_calibrated_p_maxz", "rbp_calibrated_q_maxz", "rank_rbp_maxz",
     "rbp_observed_mean_z", "rbp_calibrated_p_meanz", "rbp_calibrated_q_meanz", "rank_rbp_meanz",
-    "rbp_calib_perms_used", "rbp_calib_stage",
+    "rbp_calib_perms_used", "rbp_calib_stage", "rbp_calib_perms_used_maxz", "rbp_calib_stage_maxz",
+    "rbp_calib_perms_used_meanz", "rbp_calib_stage_meanz",
     "selected_motif_key", "calibrated_p", "calibrated_q", "rank_motif_level",
     "selected_motif_key_rowunit", "calibrated_p_rowunit", "calibrated_q_rowunit",
     "rank_motif_level_rowunit", "permutation_unit",
@@ -573,12 +589,12 @@ NULL_DESCRIPTION = (
 
 def validity_sentence(report):
     """The one inferential statement the README, LESSONS.md, the workbook, the readout and the legend share."""
-    return ("Every calibrated p is a valid permutation p: an unpromoted test keeps its stage-1 p (B = {:,}, "
-            "resolution 1/{:,}) and a promoted test takes its stage-2 p (B = {:,}, resolution 1/{:,}); "
-            "calib_perms_used gives each p's B. BH over valid p-values controls the FDR under PRDS-type "
-            "dependence, and mixed resolutions do not break that.".format(
-                report["stage1_permutations"], report["stage1_permutations"] + 1,
-                report["stage2_permutations"], report["stage2_permutations"] + 1))
+    return ("Every calibrated p is a valid permutation p: each test reports its stage-2 p (B = {:,}, resolution "
+            "1/{:,}) only when its OWN stage-1 p (B = {:,}, resolution 1/{:,}) is <= {}, otherwise its stage-1 p, "
+            "so P(p <= a) <= a at every a (docs/two_stage_validity.md); calib_perms_used gives each p's B. BH over "
+            "such super-uniform p controls the FDR under PRDS-type dependence; PRDS is assumed, not proven.".format(
+                report["stage2_permutations"], report["stage2_permutations"] + 1,
+                report["stage1_permutations"], report["stage1_permutations"] + 1, report["refine_threshold"]))
 
 
 def readme_rows(report, alias_table, rowunit_root):
@@ -643,15 +659,19 @@ def readme_rows(report, alias_table, rowunit_root):
                       "Not computed for this run (no --rowunit-root); the columns are NA."),
         ("rank_*", "Rank among RBPs within a plotted panel by q, then p, then the observed statistic, then "
                    "RBP name."),
-        ("Stages", "Stage 1 = {} permutations for every test; stage 2 = {} for a motif-direction pair with any "
-                   "stage-1 p <= {}, and for an RBP-direction when any RBP-level statistic did or any of its "
-                   "motifs was promoted. Seed {}; independent stage streams.".format(
+        ("Stages", "Stage 1 = {} permutations for every test. Stage 2 = {} permutations, drawn for a motif-direction "
+                   "pair or an RBP-direction holding at least one test with stage-1 p <= {}. Promotion is "
+                   "self-triggered: each test (motif level per sub-region and pooled region; RBP min-P, max-z and "
+                   "mean-z per pooled region) reports its stage-2 p only when its OWN stage-1 p <= {}; a promoted "
+                   "neighbour never switches it. Seed {}; independent stage streams.".format(
                        report["stage1_permutations"], report["stage2_permutations"],
-                       report["refine_threshold"], report["seed"])),
+                       report["refine_threshold"], report["refine_threshold"], report["seed"])),
         ("Validity", validity_sentence(report)),
         ("calib_perms_used / rbp_calib_perms_used", "The B behind each calibrated p: {:,} (stage 1, resolution "
                                                     "1/{:,}) or {:,} (stage 2, resolution 1/{:,}). calib_stage "
-                                                    "says which.".format(
+                                                    "says which. rbp_calib_* = min-P; rbp_calib_*_maxz and "
+                                                    "rbp_calib_*_meanz = the sensitivity statistics, each staged "
+                                                    "by its own stage-1 p.".format(
                                                         report["stage1_permutations"],
                                                         report["stage1_permutations"] + 1,
                                                         report["stage2_permutations"],
@@ -740,12 +760,14 @@ def readout_lines(arm, condensed, report):
         "- **Row unit (sensitivity, not reportable)**: {}.".format(
             "*_rowunit columns from " + report["rowunit_source"] if report["rowunit_source"] else "not computed"),
         "",
-        "Stage 1: {} permutations, seed {}. Stage 2: {} permutations for {} unique motif-direction pairs and {} "
-        "RBP-directions ({} pairs run). {} The largest calibrated p among q<0.05 calls is {} (motif), {} (RBP "
+        "Stage 1: {} permutations, seed {}. Stage 2: {} permutations drawn for {} unique motif-direction pairs and "
+        "{} RBP-directions ({} pairs run); {} of {} motif-level family tests and {} of {} RBP min-P tests report "
+        "their stage-2 p (self-triggered). {} The largest calibrated p among q<0.05 calls is {} (motif), {} (RBP "
         "min-P), {} (RBP max-z), {} (RBP mean-z).".format(
             report["stage1_permutations"], report["seed"], report["stage2_permutations"],
             report["unique_pairs_promoted_motif_level"], report["rbp_directions_promoted"],
-            report["stage2_pairs_run"], validity_sentence(report),
+            report["stage2_pairs_run"], report["motif_family_tests_reporting_stage2"], report["motif_family_size"],
+            report["rbp_family_tests_reporting_stage2"]["minp"], report["rbp_family_size"], validity_sentence(report),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["motif"]),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["rbp_minp"]),
             fmt(report["max_calibrated_p_among_q_lt_0.05"]["rbp_maxz"]),
