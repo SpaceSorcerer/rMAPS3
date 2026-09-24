@@ -360,7 +360,8 @@ def calibrated_entries(arm, root, mappings):
             raise ValueError(f'Unexpected calibrated panel {direction} x {pooled}')
         if len({r['calibrated_q'] for r in group}) != 1 or len({r['calibrated_p_pooled'] for r in group}) != 1:
             raise ValueError(f'Calibrated pooled p/q disagree within {key} {direction} {pooled}')
-        rep = min(group, key=lambda r: (float(r['native_ranksum_p']), -float(r['enrichment_ratio']), r['region']))
+        rep = min(group, key=lambda r: (float(r['native_ranksum_p']), ratio_order(ratio_value(r['enrichment_ratio'])),
+                                        r['region']))
         if not math.isclose(min(float(r['native_ranksum_p']) for r in group),
                             float(rep['native_ranksum_p_pooled']), rel_tol=1e-12):
             raise ValueError(f'Calibrated native pooled p is not the sub-region minimum: {key}')
@@ -368,7 +369,7 @@ def calibrated_entries(arm, root, mappings):
                         'direction_label': direction, 'pooled_region': pooled, 'region': rep['region'],
                         '_p': float(rep['calibrated_p_pooled']), '_native_p': float(rep['native_ranksum_p_pooled']),
                         '_q': float(rep['calibrated_q']), '_native_q': float(rep['native_q']),
-                        '_ratio': float(rep['enrichment_ratio']),
+                        '_ratio': ratio_value(rep['enrichment_ratio']),
                         '_calib_perms_used': int(rep['calib_perms_used_pooled']),
                         '_calib_stage': rep['calib_stage_pooled'],
                         '_p_rowunit': float(rep['calibrated_p_pooled_rowunit']),
@@ -400,8 +401,8 @@ def calibrated_entries(arm, root, mappings):
             raise ValueError(f'HGNC naming disagrees with the calibration summary: {ours} vs {expected}')
         if not 0 < e['_p'] <= 1 or not 0 <= e['_q'] <= 1 or not 0 < e['_rbp_p'] <= 1 or not 0 <= e['_rbp_q'] <= 1:
             raise ValueError(f'Invalid calibrated p/q for {e["motif_key"]}')
-        if e['_ratio'] < 0 or not math.isfinite(e['_ratio']):
-            raise ValueError(f'Invalid enrichment ratio for {e["motif_key"]}')
+        if not math.isnan(e['_ratio']) and (e['_ratio'] < 0 or not math.isfinite(e['_ratio'])):
+            raise ValueError(f'Invalid enrichment ratio for {e["motif_key"]}')  # NA (undefined) is drawn open
     return entries, sources, report
 
 
@@ -412,6 +413,17 @@ def log_ok(path):
         return False
     lines = [l for l in path.read_text(encoding='utf-8', errors='replace').splitlines() if l.strip()]
     return bool(lines) and 'exit=0' in lines[-1]
+
+
+def ratio_value(v):
+    """An enrichment or motif-score ratio from a summary table: 'NA' (background count 0, ratio undefined) -> nan."""
+    text = str(v).strip()
+    return float('nan') if text.upper() in ('NA', 'NAN', '') else float(text)
+
+
+def ratio_order(x):
+    """Tie-break key for 'ratio descending': an undefined ratio sorts after every defined one, never breaks a p."""
+    return -x if math.isfinite(x) else math.inf
 
 
 def _num(v):
@@ -1027,7 +1039,7 @@ def mcolors_to_rgb(hx):
 
 
 def rank_key(r):
-    return (r['_p'], -r['_ratio'], r['_label'], r['motif_key'])
+    return (r['_p'], ratio_order(r['_ratio']), r['_label'], r['motif_key'])
 
 
 def select_panels(entries, layer, kind, top_n=10):
@@ -1166,7 +1178,7 @@ def draw_legend(fig, layer, refinement, size_key, open_dots, excluded=False, kin
                  direction,
                  'stems above the cap are truncated and labelled with their value']
     if open_dots:
-        lines += ['an open dot means the background count was 0, so the ratio is undefined']
+        lines += ['open dot = ratio undefined (background count 0)']
     if excluded:
         lines += ['core spliceosome + broad binders excluded (lab RBP-RELI lists); SRSF1 always shown']
     heights = [44 if line == 'SIZE_KEY' else 26 for line in lines]
@@ -2046,7 +2058,8 @@ def main(argv=None):
                                            'source_rbp': r['RBP'], 'motif_key': r['motif_key'],
                                            'selected_sub_region': r['region'], 'p': r['_p'], 'q': r['_q'],
                                            'native_p': r['_native_p'],
-                                           'enrichment_ratio': None if layer == LAYERS[0] else r['_ratio'],
+                                           'enrichment_ratio': (None if layer == LAYERS[0] or math.isnan(r['_ratio'])
+                                                                else r['_ratio']),
                                            'k_sig_motifs': r['_k'], 'n_motifs_in_group': r['_n'],
                                            'hgnc_symbol': r['_hgnc_symbol'], 'naming_action': r['_naming_action'],
                                            'calib_perms_used': r['_calib_perms_used'], 'calib_stage': r['_calib_stage'],

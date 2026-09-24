@@ -35,7 +35,9 @@ def zero_motif(motifs):
                 and kmers.count(m.split(".", 1)[1]) == 1 and not m.startswith(("QKI.", "motif_")))
 
 
-def build(tmp_path: Path, b1=99, b2=499, commit=None):
+def build(tmp_path: Path, b1=99, b2=499, commit=None, zero_bg=None):
+    """zero_bg=(motif prefix, sub-region index): that motif gets no background hit in any window of that sub-region,
+    so its background count and proportion are 0 there and its ratios are undefined (NA)."""
     commit = commit or COMMIT
     motifs = sorted(fork_motif_keys())
     zero = zero_motif(motifs)
@@ -62,6 +64,8 @@ def build(tmp_path: Path, b1=99, b2=499, commit=None):
             rows, ids = [], []
             for c, size in enumerate(sizes):
                 counts = rng.poisson(rate, n_windows).astype(np.int16)
+                if zero_bg and group == "bg" and motif.startswith(zero_bg[0]):
+                    counts[region == zero_bg[1]] = 0
                 for r in range(size):
                     rows.append(counts)
                     ids.append("chr1:+:{}:{}:{}:1:2:3".format(OFFSETS[group] + 10 * c, OFFSETS[group] + 10 * c + 5, r))
