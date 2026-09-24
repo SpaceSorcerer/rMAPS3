@@ -148,7 +148,7 @@ and 09-22 addenda. Dated facts keep their dates.
   - The duplication table (7 arms), the A/B/C comparison and the length comparison are byte-identical to the published TSVs.
   - Treatment B, treatment C and the length-matched run on QKI_KO_B are byte-identical to the original scripts at 200/1,000 permutations.
   - Motif scores on QKI_KO_B are byte-identical to the published v2 tables.
-- **Repo-relative readers.** `rank_stability.py` and `summarize_rmaps_regions_lab_v5.py` now resolve the engine and alias table inside this checkout. The engine is unchanged since `3faead9`. The QKI_KO_B rerun is recorded in `_lab/CONSOLIDATION_REPORT_2026-09-24.md`.
+- **Repo-relative readers.** `rank_stability.py` and `summarize_rmaps_regions_lab_v5.py` now resolve the engine and alias table inside this checkout. The engine is unchanged since `3faead9`. The QKI_KO_B rerun is recorded in `docs/CONSOLIDATION_REPORT_2026-09-24.md`.
 
 ## Evidence read
 
