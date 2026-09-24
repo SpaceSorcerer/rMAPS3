@@ -29,6 +29,8 @@ from openpyxl.styles import Font
 
 DIRECTIONS = ["up", "dn"]
 DIRECTION_LABEL = {"up": "included", "dn": "skipped"}
+CONTROL_COLUMNS = ["arm", "pooled_region", "direction", "method", "symbol_rank", "symbol_p",
+                   "n_rbp_in_panel", "best_motif_or_reason", "symbol"]
 POOL_TO_REGIONS = {
     "Upstream Intron": ("smallest_p_in_upstreamExonIntron", "smallest_p_in_upstreamIntron"),
     "Exon Body": ("smallest_p_in_targetExon-5prime", "smallest_p_in_targetExon-3prime"),
@@ -180,6 +182,11 @@ def main():
     parser.add_argument("--alias", required=True,
                         help="HGNC alias table: table_name<TAB>hgnc_symbol")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--positive-control", default=None,
+                        help="HGNC symbol whose rank is reported on --positive-control-panels of every arm "
+                             "(positive_control.tsv); none by default, and no arm name is read as a control")
+    parser.add_argument("--positive-control-panels", default="INCLUDED:Upstream Intron,SKIPPED:Downstream Intron",
+                        help="comma-separated DIRECTION:Pooled Region panels for --positive-control")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -301,33 +308,36 @@ def main():
                 **row))
     log("wrote {} method-pair rows -> {}".format(len(summary_rows), summary_path))
 
-    # ---- QKI positive control -------------------------------------------------
-    control_panels = [("up", "Upstream Intron"), ("dn", "Downstream Intron")]
-    qki_rows = []
-    for arm in [a for a in args.arms if a.startswith("QKI_KO")]:
+    # ---- positive control: the --positive-control symbol on every arm, none by default ---------------
+    symbol = args.positive_control
+    by_label = {label.upper(): direction for direction, label in DIRECTION_LABEL.items()}
+    control_panels = [(by_label[label.strip().upper()], pool.strip()) for label, pool in
+                      (part.split(":", 1) for part in args.positive_control_panels.split(","))]
+    control_rows = []
+    for arm in (args.arms if symbol else []):
         for direction, pool in control_panels:
             for method in METHODS:
                 key = (arm, direction, pool, method)
                 if key not in panel_best:
-                    qki_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
-                                     "NA", "NA", "NA", "not_available"])
+                    control_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
+                                         "NA", "NA", "NA", "not_available", symbol])
                     continue
                 rbps, array, ranks, values = panel_best[key]
-                if "QKI" not in rbps:
-                    qki_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
-                                     "NA", "NA", str(len(rbps)), "QKI_absent_from_panel"])
+                if symbol not in rbps:
+                    control_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
+                                         "NA", "NA", str(len(rbps)), "symbol_absent_from_panel", symbol])
                     continue
-                index = rbps.index("QKI")
-                qki_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
-                                 "%g" % ranks[index],
-                                 ("NA" if not math.isfinite(array[index]) else repr(float(array[index]))),
-                                 str(len(rbps)), values["QKI"][1]])
-    qki_path = out / "qki_positive_control.tsv"
-    with open(qki_path, "w", newline="\n", encoding="utf-8") as handle:
-        handle.write("arm\tpooled_region\tdirection\tmethod\tqki_rank\tqki_p\tn_rbp_in_panel\tbest_motif_or_reason\n")
-        for row in qki_rows:
+                index = rbps.index(symbol)
+                control_rows.append([arm, pool, DIRECTION_LABEL[direction], method,
+                                     "%g" % ranks[index],
+                                     ("NA" if not math.isfinite(array[index]) else repr(float(array[index]))),
+                                     str(len(rbps)), values[symbol][1], symbol])
+    control_path = out / "positive_control.tsv"
+    with open(control_path, "w", newline="\n", encoding="utf-8") as handle:
+        handle.write("\t".join(CONTROL_COLUMNS) + "\n")
+        for row in control_rows:
             handle.write("\t".join(row) + "\n")
-    log("wrote {} rows -> {}".format(len(qki_rows), qki_path))
+    log("wrote {} rows -> {} (positive control: {})".format(len(control_rows), control_path, symbol or "none"))
 
     # ---- normal-approximation calibration ------------------------------------
     # audited_mannwhitney and audited_fisher_binary score the SAME binary 2x2;
@@ -450,10 +460,9 @@ def main():
                       None if not math.isfinite(row["mean_spearman_rho"]) else round(row["mean_spearman_rho"], 4),
                       None if not math.isfinite(row["mean_top10_overlap"]) else round(row["mean_top10_overlap"], 2)])
 
-    control = workbook.create_sheet("QKI_positive_control")
-    control.append(["arm", "pooled_region", "direction", "method", "qki_rank", "qki_p",
-                    "n_rbp_in_panel", "best_motif_or_reason"])
-    for row in qki_rows:
+    control = workbook.create_sheet("positive_control")
+    control.append(CONTROL_COLUMNS)
+    for row in control_rows:
         control.append(row)
 
     for arm in args.arms:
@@ -511,13 +520,13 @@ def main():
             if ok:
                 handle.write("{}  {}\n".format(md5(Path(path)), path))
 
-    write_report(out, args, availability, summary_rows, qki_rows, motif_rows, gap_rows, log)
+    write_report(out, args, availability, summary_rows, control_rows, motif_rows, gap_rows, log)
     log("wall_seconds={:.1f}".format(time.time() - started))
     log("exit=0")
     log_handle.close()
 
 
-def write_report(out, args, availability, summary_rows, qki_rows, motif_rows, gap_rows, log):
+def write_report(out, args, availability, summary_rows, control_rows, motif_rows, gap_rows, log):
     """Descriptive tables first, then one validity line per method, then a shortlist."""
     lines = ["# Statistical-method comparison for the rMAPS3 SE motif map", ""]
     lines.append("Generated {}. Human / GRCh38 (hg38) / GENCODE v49; SE events only. Arms: {}.".format(
@@ -525,7 +534,7 @@ def write_report(out, args, availability, summary_rows, qki_rows, motif_rows, ga
     lines.append("No p-value was recomputed for any Fisher or engine layer; root tables were read as produced. "
                  "Panels are the three RBP-RELI pooled regions x two directions; per-RBP value is the best motif. "
                  "Full tables: `method_rank_comparison.xlsx/.tsv`, `method_pair_summary.tsv`, "
-                 "`repetitive_motif_shift.tsv`, `qki_positive_control.tsv`, `method_availability.tsv`.")
+                 "`repetitive_motif_shift.tsv`, `positive_control.tsv`, `method_availability.tsv`.")
     lines.append("")
     lines.append("## Availability")
     lines.append("")
@@ -535,19 +544,24 @@ def write_report(out, args, availability, summary_rows, qki_rows, motif_rows, ga
         lines.append("- {}: {}".format(arm, "all six methods present" if not missing
                                        else "missing " + ", ".join(missing)))
     lines.append("")
-    lines.append("## QKI positive control (rank; p in parentheses)")
+    if args.positive_control:
+        lines.append("## Positive control {} (rank; p in parentheses)".format(args.positive_control))
+    else:
+        lines.append("## Positive control")
+        lines.append("")
+        lines.append("Not checked: no --positive-control given.")
     lines.append("")
-    control_methods = [m for m in METHODS if any(r[3] == m and r[4] != "NA" for r in qki_rows)]
+    control_methods = [m for m in METHODS if any(r[3] == m and r[4] != "NA" for r in control_rows)]
     lines.append("| arm x panel | " + " | ".join(control_methods) + " |")
     lines.append("|---" * (len(control_methods) + 1) + "|")
     seen = []
-    for row in qki_rows:
+    for row in control_rows:
         if (row[0], row[1], row[2]) not in seen:
             seen.append((row[0], row[1], row[2]))
     for arm, pool, direction in seen:
         cells = []
         for method in control_methods:
-            match = [r for r in qki_rows if r[0] == arm and r[1] == pool
+            match = [r for r in control_rows if r[0] == arm and r[1] == pool
                      and r[2] == direction and r[3] == method]
             if not match or match[0][4] == "NA":
                 cells.append("n/a")

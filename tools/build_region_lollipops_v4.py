@@ -2291,6 +2291,7 @@ def main(argv=None):
     print(f'OK v4.3 index, audits, layout report and manifest: {out}', flush=True)
     if skipped:
         print('SKIPPED LAYERS: ' + '; '.join(f'{s["arm"]}/{s["layer"]}' for s in skipped), flush=True)
+    return controls  # the positive_control_audit.tsv rows, both layers; the wrapper reads that file back
 
 
 if __name__ == '__main__':

@@ -1103,8 +1103,12 @@ def run_status(missing, allow_partial: bool, control_failed: bool, failed: bool 
     return next((status, code) for status, code, _ in STATUS_PRECEDENCE if holds[status])
 
 
+def failed_control_layers(figure_controls) -> list:
+    return list(dict.fromkeys(r["layer"] for r in figure_controls if not r["pass"]))
+
+
 def write_index(args, out: Path, engine_out: Path, counts, controls, conversion, extras,
-                figures=None, missing=None) -> Path:
+                figures=None, missing=None, figure_controls=None) -> Path:
     import html as html_mod
 
     def esc(value):
@@ -1155,6 +1159,22 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
             parts.append(f"<tr><td>{esc(row['panel'])}</td><td>{esc(row['top_rbp'])}</td>"
                          f"<td>{esc(row['symbol_rank'])}</td>"
                          f"<td class=\"{klass}\">{'PASS' if row['pass'] else 'FAIL'}</td></tr>")
+        parts.append("</table>")
+    if figure_controls:
+        failed = failed_control_layers(figure_controls)
+        verdict = (f"Figure positive control {args.positive_control} FAILED on layer(s): {', '.join(failed)}"
+                   if failed else f"Figure positive control {args.positive_control} passed on every drawn layer")
+        if args.positive_control_advisory:
+            verdict += " (advisory: --positive-control-advisory, not counted in the run status)"
+        parts.append(f'<h2>Figure positive control</h2><p class="{"fail" if failed else "pass"}">{esc(verdict)}</p>'
+                     "<table><tr><th>layer</th><th>variant</th><th>kind</th><th>panel</th><th>first</th>"
+                     "<th>verdict</th></tr>")
+        for row in figure_controls:
+            klass = "pass" if row["pass"] else "fail"
+            parts.append("<tr>" + "".join(f"<td>{esc(row.get(k))}</td>"
+                                          for k in ("layer", "variant", "kind", "panel", "first"))
+                         + f"<td class=\"{klass}\">{'PASS' if row['pass'] else 'FAIL'}"
+                         + (f" ({esc(row['reason'])})" if row.get("reason") else "") + "</td></tr>")
         parts.append("</table>")
     if figures is not None and figures.get("figures"):
         parts.append(
@@ -1295,7 +1315,29 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
     produced.append(("Region lollipops, figure version " + figure_version(),
                      [("figure index", figures / "index.html"),
                       ("rank workbook", figures / args.arm / f"{args.arm}_rank_comparison.xlsx")]))
-    return produced
+    controls = (read_figure_controls(figures / "positive_control_audit.tsv", args.positive_control)
+                if args.positive_control else [])
+    return produced, controls
+
+
+FULL_FIGURE_LAYERS = ("released_ranksum_rawP", "calibrated_ranksum")
+
+
+def read_figure_controls(audit: Path, symbol: str) -> list:
+    """The full-mode builder's positive_control_audit.tsv rows, pass as a bool. A layer with no row, or no file at
+    all, adds one failing row: a control that was never checked is not a pass."""
+    import csv
+    rows = []
+    if audit.is_file():
+        with open(audit, encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle, delimiter="\t"):
+                rows.append({**{k: (None if v == "NA" else v) for k, v in row.items()}, "pass": row["pass"] == "True"})
+    for layer in FULL_FIGURE_LAYERS:
+        if not any(r["layer"] == layer for r in rows):
+            rows.append({"layer": layer, "variant": None, "kind": None, "panel": None, "symbol": symbol,
+                         "first": None, "pass": False,
+                         "reason": f"no {layer} row in {audit}: the control was not checked on this layer"})
+    return rows
 
 
 def check_builder_manifest(figures: Path, writer: str) -> None:
@@ -1611,9 +1653,9 @@ def main(argv=None) -> int:
                     "PASS" if row["pass"] else "FAIL"))
         write_workbook(out / "quick_summary.xlsx", sheets)
         log(f"wrote {out / 'quick_summary.xlsx'}")
-        extras = []
+        extras, figure_controls = [], []
         if args.mode == "full":
-            extras = run_full_layers(args, out, engine_out, counts_root, log, env)
+            extras, figure_controls = run_full_layers(args, out, engine_out, counts_root, log, env)
         figures = None
         if figures_wanted(args):
             reason = figure_skip_reason(args, conversion)
@@ -1623,6 +1665,13 @@ def main(argv=None) -> int:
             else:
                 figures = build_quick_figures(args, out, engine_out, roots, root_motifs, scores,
                                               alias, known, additional, log)
+                figure_controls = figures["controls"]
+        failed_layers = failed_control_layers(figure_controls)
+        if figure_controls:
+            log(f"figure positive control {args.positive_control}: "
+                + (f"FAILED on layer(s): {', '.join(failed_layers)}" if failed_layers
+                   else "passed on every drawn layer")
+                + (" (advisory)" if args.positive_control_advisory else ""))
         # Completeness: every required path exists, is non-empty and is sha256-hashed into the manifest. The
         # index is written after the others are checked (it prints what is missing), then checked itself.
         required = required_paths(args, root_motifs, registered=_REGISTRY.paths())
@@ -1630,7 +1679,8 @@ def main(argv=None) -> int:
         if (figures or {}).get("skipped") and not args.no_figures and any(
                 c == "figures" for _, _, _, c in required_spec(args)):
             missing.append("main-layer figures not drawn: " + figures["skipped"])
-        write_index(args, out, engine_out, counts, controls, conversion, extras, figures, missing)
+        write_index(args, out, engine_out, counts, controls, conversion, extras, figures, missing,
+                    figure_controls=figure_controls)
         index_rows, index_missing = inventory(out, [r for r in required if r[1] == "index.html"])
         hashed += index_rows
         missing += index_missing
@@ -1644,10 +1694,10 @@ def main(argv=None) -> int:
         for _, rel in extra:
             log("WARN registered but not in REQUIRED_ARTIFACTS: " + rel)
         manifest["inventory"] = hashed
-        figure_controls = (figures or {}).get("controls", [])
         manifest.update(status="inventory_checked", engine_wall_seconds=wall,
                         n_motifs=len(motifs), conversion=conversion,
                         positive_control=controls, figure_positive_control=figure_controls,
+                        failed_positive_control_layers=failed_layers,
                         figures=[str(p) for p in (figures or {}).get("figures", [])],
                         figures_skipped=(figures or {}).get("skipped"),
                         event_counts={k: counts[k]["n_events"] for k in counts}, missing=missing,
