@@ -560,15 +560,21 @@ def resolve_texts(args):
              'tail_text': get('tail_text') or record.get('tail_text'),
              'tail_text_supplement': get('tail_text_supplement') or record.get('tail_text_supplement'),
              'commit': get('released_commit') or RELEASED_COMMIT,
-             'stat_method': get('released_stat_method') or get('stat_method') or STAT_METHOD}
+             'stat_method': get('released_stat_method') or get('stat_method') or STAT_METHOD,
+             'rule': get('gate_rule')}
     texts['source'] = ('command line' if any([get('gate_text'), get('direction_text'), get('tail_text'),
                                               get('tail_text_supplement')]) else
                        f'gate record {get("gate_record")}' if record else 'dissertation default')
     return texts
 
 
+def gate_rule_of(texts, arm):
+    """The event-set rule to print: the explicit one (--gate-rule, or the wrapper's gate record), else the arm suffix."""
+    return texts.get('rule') or (arm.rsplit('_', 1)[1] if '_' in arm else '')
+
+
 def gate_lines(texts, arm, counts):
-    rule = arm.rsplit('_', 1)[1] if '_' in arm else ''
+    rule = gate_rule_of(texts, arm)
     fields = _Keep(counts, rule=rule)
     if texts['gate_text']:
         raw = texts['gate_text'].replace('\\n', '\n').split('\n')
@@ -605,7 +611,7 @@ def sidecar_statements(texts, arm, counts, gate, sens_status):
     prints, and nothing dissertation-specific is asserted."""
     n = (f'included {counts["n_up"]}, skipped {counts["n_dn"]}, background {counts["n_bg"]}')
     if texts.get('source') == 'dissertation default':
-        gate_sentence = (f'- Gate {gate}, rule {arm.rsplit("_", 1)[1]}: {n}; genes absent from the DESeq2 table '
+        gate_sentence = (f'- Gate {gate}, rule {gate_rule_of(texts, arm)}: {n}; genes absent from the DESeq2 table '
                          f'retained ({counts["n_expr_unknown_in_fg"]} foreground / {counts["n_expr_unknown_in_bg"]} '
                          'background events).')
         return gate_sentence, DEFAULT_SIDECAR_MD5, DEFAULT_SIDECAR_LENGTH
@@ -1858,11 +1864,15 @@ def main(argv=None):
     ap.add_argument('--gate-record', default=None,
                     help='JSON with any of gate_text, direction_text, tail_text, tail_text_supplement; '
                          'command-line flags take precedence')
+    ap.add_argument('--gate-rule', choices=('A', 'B', 'Beffect'), default=None,
+                    help="single-arm runs: the event-set rule to print; default = the text after the arm's last _")
     ap.add_argument('--length-root', default=None,
                     help='root holding <arm>/lengthmatched_report.json for the exon-length caveat clause')
     ap.add_argument('--v41-archive-name', default=None,
                     help='folder name of an archived v4.1 index to link from index.html')
     args = ap.parse_args(argv)
+    if args.gate_rule and len(args.arms) > 1:
+        ap.error('--gate-rule names the rule of one arm; give one arm per call')
     args.counts_json = dict(pair.split('=', 1) for pair in args.counts_json)
     for pair in args.arm_label:
         arm, _, text = pair.partition('=')

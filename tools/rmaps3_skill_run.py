@@ -752,7 +752,8 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
     engine_root = engine_root_of(args)
     commit = git_revision(engine_root)[:7]
     texts = lol.resolve_texts(args)
-    texts.update(commit=commit, stat_method=args.stat_method)
+    texts.update(commit=commit, stat_method=args.stat_method,
+                 rule=check_gate_rule(args, bool(args.rmats_se))[0])
     entries, _, n_motifs = lol.released_entries(arm, engine_out.parent, mappings, commit, args.stat_method)
     exclusion_rows, dropped = lol.exclusion_audit(arm, entries, lists)
     lookup, size_key = lol.load_motif_scores(arm, score_root)
@@ -815,10 +816,39 @@ def build_quick_figures(args, out: Path, engine_out: Path, roots: dict, motifs: 
 
 
 # ------------------------------------------------------------------ index page
-def missing_deliverables(args, conversion, figures) -> list:
-    """What the mode promised but the run did not produce: verified archives, and figures unless
-    --no-figures was given."""
+def required_artefacts(args) -> list:
+    """The deliverables this engine x statistic x mode promises, beyond the engine's two root tables and
+    quick_summary.xlsx, which every run needs (a run without them fails, exit 1).
+
+    released + mannwhitney: count archives that reproduce the root tables (VERIFY.md), and in quick mode the
+        main-layer figures unless --no-figures.
+    released + fisher: count archives converted from the countDist temporaries; the verifier recomputes
+        the rank-sum statistic, so a Fisher run cannot be verified and keeps its temporaries.
+    audited (either statistic): the engine's own positional/*.hits.npz; the archive reader targets the
+        released schema, and the figures draw the released rank-sum only.
+    """
+    if args.engine == "audited":
+        return ["audited positional archives (engine positional/*.hits.npz)"]
+    if args.stat_method == "fisher":
+        return ["converted count archives (countDist -> npz; a Fisher run cannot be verified)"]
+    needed = ["verified count archives (VERIFY.md)"]
+    if figures_wanted(args):
+        needed.append("main-layer figures")
+    return needed
+
+
+def missing_deliverables(args, conversion, figures, engine_out=None) -> list:
+    """What this engine x statistic x mode promised (required_artefacts) but the run did not produce."""
     missing = []
+    if args.engine == "audited":
+        positional = Path(engine_out) / "positional" if engine_out is not None else None
+        if positional is None or not any(positional.glob("*.hits.npz")):
+            missing.append(f"audited positional archives: no *.hits.npz under {positional}")
+        return missing
+    if args.stat_method == "fisher":
+        if not conversion.get("converted"):
+            missing.append("converted count archives: " + (conversion.get("reason") or "conversion did not run"))
+        return missing
     if not conversion.get("verified"):
         missing.append("verified count archives: " + (conversion.get("reason") or "verification did not run"))
     if figures_wanted(args) and not (figures or {}).get("figures"):
@@ -851,6 +881,8 @@ def write_index(args, out: Path, engine_out: Path, counts, controls, conversion,
         f"<p>Mode <b>{esc(args.mode)}</b>; engine <b>{esc(args.engine)}</b>; statistic "
         f"<b>{esc(args.stat_method)}</b>; {esc(args.species)} / {esc(args.genome)}; SE events only.</p>",
         f"<p><b>{esc(STAT_CAVEATS[args.stat_method])}</b></p>",
+        f"<p>Complete for this engine and statistic means: the two root tables, quick_summary.xlsx and "
+        f"{esc('; '.join(required_artefacts(args)))}.</p>",
         *([f'<p style="color:#D55E00"><b>{"PARTIAL (--allow-partial)" if args.allow_partial else "INCOMPLETE"}'
            f" run. Missing: {esc('; '.join(missing))}</b></p>"] if missing else []),
         "<h2>Event sets</h2><table><tr><th>set</th><th>n events</th><th>file</th></tr>",
@@ -1021,6 +1053,9 @@ def run_full_layers(args, out: Path, engine_out: Path, counts_root, log: Logger,
                "--released-commit", git_revision(engine_root_of(args))[:7],
                "--released-stat-method", args.stat_method,
                "--top-n", str(args.top_n)]
+    rule = check_gate_rule(args, bool(args.rmats_se))[0]
+    if rule:
+        command += ["--gate-rule", rule]
     if args.arm in set(args.underpowered_arms):
         command += ["--underpowered-arms", args.arm]
     if args.method_comparison:
@@ -1050,8 +1085,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dn")
     p.add_argument("--bg")
     p.add_argument("--gate-rule", choices=GATE_RULES, default=None,
-                   help="event-set rule the inputs were built under; must equal the arm suffix. Raw "
-                        "--rmats-se input is split by the portable rule-A builder, so it takes rule A only")
+                   help="event-set rule the inputs were built under; overrides the arm-name suffix and must "
+                        "agree with a gate record that states one. Raw --rmats-se input is split by the "
+                        "portable rule-A builder, so it takes rule A only")
     p.add_argument("--genome-root", default=None,
                    help="required: directory holding <genome>/<genome>.fa and its .fai")
     p.add_argument("--genome", default="hg38", help="FASTA build directory name, e.g. hg38 or mm10")
@@ -1140,16 +1176,16 @@ def validate(args) -> None:
                          "--engine released")
     draws = args.mode == "full" or (figures_wanted(args) and args.engine == "released"
                                     and args.stat_method == "mannwhitney")
-    if draws and "_" not in args.arm:
-        raise ValueError("the figure builder reads the gate rule from the text after the arm's last "
-                         "'_' (e.g. QKI_KO_B -> rule B); name the arm <NAME>_<RULE> or pass --no-figures")
     if draws and presplit and not args.gate_counts:
         raise ValueError("the figure footer prints the gate's expression-unknown event counts, which "
                          "pre-split files do not carry; pass --gate-counts <counts.json> (the gate "
                          "record <event_sets>/<ARM>/<gate>_rule<R>/counts.json) or --no-figures")
     if args.gate_counts and not presplit:
         raise ValueError("--gate-counts is for pre-split inputs; --rmats-se writes its own gate record")
-    check_gate_rule(args, from_rmats)
+    rule, _ = check_gate_rule(args, from_rmats)
+    if draws and rule is None:
+        raise ValueError("the figure footer prints the event-set rule, and none is stated: pass --gate-rule, a "
+                         "--gate-counts record with a 'rule' field, or name the arm <NAME>_<RULE>; or --no-figures")
     for key in ("window", "step", "intron", "exon", "workers", "blas_threads", "permutations",
                 "refine_perms", "bootstraps", "top_n"):
         if getattr(args, key) < 1:
@@ -1166,20 +1202,45 @@ def arm_rule(arm: str):
     return arm.rsplit("_", 1)[1] if "_" in arm else None
 
 
-def check_gate_rule(args, from_rmats: bool) -> None:
-    """The effective gate rule must agree with the arm name, so no set is labelled with a rule it
-    was not built under. Raw rMATS input only ever goes through the portable rule-A builder."""
+def gate_record_rule(args):
+    """The 'rule' field of the --gate-counts gate record, or None when there is no record or no field."""
+    if not args.gate_counts or not Path(args.gate_counts).is_file():
+        return None
+    rule = json.loads(Path(args.gate_counts).read_text(encoding="utf-8-sig")).get("rule")
+    if rule is not None and str(rule) not in GATE_RULES:
+        raise ValueError(f"gate record {args.gate_counts} states rule {rule!r}, not one of {', '.join(GATE_RULES)}")
+    return None if rule is None else str(rule)
+
+
+def check_gate_rule(args, from_rmats: bool):
+    """(effective rule, its source). The rule comes from --gate-rule or the gate record; the arm name is a label
+    and is read only when neither states a rule.
+
+    Raw --rmats-se input is split by the portable rule-A builder, so its rule is A: --gate-rule B/Beffect is
+    refused, and so is an arm named *_B / *_Beffect unless --gate-rule A says the suffix is not a rule label.
+    Pre-split input takes any rule; --gate-rule and the gate record must agree when both state one."""
     suffix = arm_rule(args.arm)
-    if from_rmats and suffix in RULE_B_SUFFIXES:
-        raise ValueError(f"arm {args.arm} names rule {suffix}, but --rmats-se input is split by the portable "
-                         "rule-A builder. Rule B sets are frozen concordant files: supply pre-split inputs "
-                         "(--up/--dn/--bg with --gate-counts) built under rule B")
-    if from_rmats and args.gate_rule not in (None, "A"):
-        raise ValueError(f"--gate-rule {args.gate_rule} with --rmats-se: the portable builder implements rule A "
-                         "only. Rule B sets are frozen concordant files: supply pre-split inputs")
-    if args.gate_rule is not None and suffix != args.gate_rule:
-        raise ValueError(f"--gate-rule {args.gate_rule} disagrees with the arm name {args.arm} (rule "
-                         f"{suffix}); name the arm <NAME>_{args.gate_rule}")
+    if from_rmats:
+        if args.gate_rule not in (None, "A"):
+            raise ValueError(f"--gate-rule {args.gate_rule} with --rmats-se: the portable builder implements rule A "
+                             "only. Rule B sets are frozen concordant files: supply pre-split inputs")
+        if args.gate_rule is None and suffix in RULE_B_SUFFIXES:
+            raise ValueError(f"arm {args.arm} names rule {suffix}, but --rmats-se input is split by the portable "
+                             "rule-A builder. Rule B sets are frozen concordant files: supply pre-split inputs "
+                             "(--up/--dn/--bg with --gate-counts) built under rule B, or pass --gate-rule A if "
+                             f"'{suffix}' is not a rule label")
+        return "A", ("--gate-rule A" if args.gate_rule else "portable rule-A builder (--rmats-se)")
+    record = gate_record_rule(args)
+    if args.gate_rule and record and args.gate_rule != record:
+        raise ValueError(f"--gate-rule {args.gate_rule} disagrees with the gate record {args.gate_counts} "
+                         f"(rule {record})")
+    if args.gate_rule:
+        return args.gate_rule, "--gate-rule"
+    if record:
+        return record, f"gate record {args.gate_counts}"
+    if suffix in GATE_RULES:
+        return suffix, "arm name (no --gate-rule, no rule in a gate record)"
+    return None, None
 
 
 def require_site_paths(args) -> None:
@@ -1220,7 +1281,9 @@ def main(argv=None) -> int:
                 "command": subprocess.list2cmdline(sys.orig_argv),
                 "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
                 "wrapper_md5": md5(Path(__file__).resolve()),
-                "effective_gate_rule": "A" if args.rmats_se else (args.gate_rule or arm_rule(args.arm)),
+                "effective_gate_rule": check_gate_rule(args, bool(args.rmats_se))[0],
+                "effective_gate_rule_source": check_gate_rule(args, bool(args.rmats_se))[1],
+                "required_artefacts": required_artefacts(args),
                 "fork_revision": git_revision(ROOT), "versions": versions(), "steps": [],
                 "engine_commit_verified": engine_sha}
     (out / "versions.txt").write_text(
@@ -1286,7 +1349,7 @@ def main(argv=None) -> int:
             else:
                 figures = build_quick_figures(args, out, engine_out, roots, root_motifs, scores,
                                               alias, known, additional, log)
-        missing = missing_deliverables(args, conversion, figures)
+        missing = missing_deliverables(args, conversion, figures, engine_out)
         write_index(args, out, engine_out, counts, controls, conversion, extras, figures, missing)
         figure_controls = (figures or {}).get("controls", [])
         manifest.update(status="complete", engine_wall_seconds=wall,
