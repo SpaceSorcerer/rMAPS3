@@ -1,2 +1,2 @@
 data/test/clip/PIPE-CLIP.Clusters.bed filter=lfs diff=lfs merge=lfs -text
-docs/skills/** -text
+docs/skills/** text eol=lf

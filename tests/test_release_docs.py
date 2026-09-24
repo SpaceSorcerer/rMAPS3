@@ -105,16 +105,23 @@ def lab_docs():
     return {k: v.read_text(encoding="utf-8").replace("\r\n", "\n") for k, v in docs.items()}
 
 
-def test_committed_skill_copies_are_tracked_and_byte_identical_to_the_live_skills():
+def lf(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
+def test_committed_skill_copies_are_tracked_lf_and_identical_to_the_live_skills_up_to_line_endings():
+    """The committed copies are LF (.gitattributes: text eol=lf); a live skill on Windows may be CRLF, so the two are
+    compared byte for byte after CRLF -> LF."""
     for name, committed in COMMITTED.items():
         assert committed.is_file(), f"{committed} is not in the checkout"
         assert tracked(committed.relative_to(ROOT).as_posix()), f"{committed} is not tracked"
+        assert b"\r" not in committed.read_bytes(), f"{committed} is not LF"
     live = live_skills()
     if not live:
         print("live skills absent: verified committed copies")
         return
     for name, path in live.items():
-        assert COMMITTED[name].read_bytes() == path.read_bytes(), (
+        assert lf(COMMITTED[name]) == lf(path), (
             f"docs/skills/{name}/SKILL.md differs from the live skill {path}; copy the live skill into the repository")
 
 
