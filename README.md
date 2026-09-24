@@ -220,7 +220,7 @@ Here `runs/QKI_KO_B/` is the released engine's output directory, run with `--kee
 
 Checks to read before trusting a run:
 
-- `counts/<ARM>/VERIFY.md` shows that the archives reproduce the root tables. A mismatch aborts the run.
+- `counts/<ARM>/VERIFY.md` shows that the archives reproduce every root-table value and every per-position value by exact float equality. Any mismatch, missing table or changed countDist file aborts the run and deletes nothing.
 - `summary/<ARM>/refinement_report.json` gives the stage record, the BH family sizes, and the events and target exons per set.
 - `figures/positive_control_audit.tsv` checks, on a QKI-KO arm, that QKI ranks first in INCLUDED × Upstream Intron and SKIPPED × Downstream Intron.
 
@@ -239,7 +239,7 @@ chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondE
   - Genes absent from the expression table are `expr_unknown` and retained.
   - Read the values from the gate ledger, not from this README.
 - **Chromosome names.** Names are checked against `<root>/<build>/<build>.fa.fai`. A literal `chr` is added or removed only when that resolves an existing key; unresolved names fail. This is name normalisation, not liftover.
-- **Engine outputs.** Root `pVal.*.RNAmap.txt` tables hold raw regional minima, not calibrated region p-values. Keep `temp/` until the archives verify. The wrapper deletes only verified temporaries and logs each one with its md5.
+- **Engine outputs.** Root `pVal.*.RNAmap.txt` tables hold raw regional minima, not calibrated region p-values. Keep `temp/` until the archives verify. The wrapper deletes exactly the files listed in the verifier's `verified_temporaries.tsv`, only after the verifier exits 0, and only when each still matches its listed md5. It logs each one in `logs/temp_deletion.log`.
 
 Read [the migration note](docs/MIGRATION_2026-09.md) for complete-window geometry, FASTA
 crops and the NPZ schema. The repaired engine is not numerically equivalent to the old

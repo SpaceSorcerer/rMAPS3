@@ -1,19 +1,25 @@
-"""Recompute the released rMAPS3 mannwhitney p-values from the npz archives only.
+"""Recompute the released rMAPS3 mannwhitney p-values from the npz archives only, exactly.
 
-Checks, per arm:
-  root tables - every value of pVal.{up,dn}.vs.bg.RNAmap.txt (126 motifs x 8
-                sub-regions x 2 directions) against the regional minimum of the
-                recomputed per-position p-values;
-  per-position - a seeded random sample of per-motif pVal temp-file values.
+Checks, per arm, with exact float equality (no tolerance; the archives reproduce the engine bit for bit):
+  motif set    - the archives and both root tables carry the same motif keys;
+  root tables  - every value of pVal.{up,dn}.vs.bg.RNAmap.txt (motifs x 8 sub-regions x 2 directions)
+                 against the regional minimum of the recomputed per-position p-values;
+  per-position - every value of every temp/<motif>.pVal.{up,dn}.vs.bg.txt, on the same position axis;
+  countDist    - every temp/<motif>.countDist.{up,dn,bg}.txt still hashes to the md5 recorded by
+                 countdist_to_npz.py in conversion_manifest.tsv when its archive was written.
 
-The recomputation uses only the archives written by countdist_to_npz.py and the
-tie-corrected normal approximation with continuity correction, which is what
-scipy.stats.mannwhitneyu(alternative='greater') applies in this regime.
+Only when every check passes does it write verified_temporaries.tsv (path, bytes, md5, kind): the
+exact list of temporaries the archives now stand in for. tools/rmaps3_skill_run.py deletes those
+files and nothing else, and only after this script exits 0. Any failure writes no list.
+
+The recomputation uses the tie-corrected normal approximation with continuity correction, which is
+what scipy.stats.mannwhitneyu(alternative='greater') applies in this regime.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import os
 import platform
@@ -28,15 +34,15 @@ from scipy.stats import mannwhitneyu
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rmaps_countdist_io as io  # noqa: E402
 
-SEED = 149
-ROOT_TOLERANCE = 1e-6
+MANIFEST_NAME = "verified_temporaries.tsv"
+MANIFEST_COLUMNS = ("path", "bytes", "md5", "kind")
 
 
 def log10_gap(a: float, b: float) -> float:
-    """|log10 a - log10 b|, with both-zero treated as identical."""
+    """|log10 a - log10 b|, recorded for mismatches only; the verdict is exact equality."""
     if a == b:
         return 0.0
-    if a <= 0.0 or b <= 0.0:
+    if not (a > 0.0 and b > 0.0):
         return math.inf
     return abs(math.log10(a) - math.log10(b))
 
@@ -59,18 +65,41 @@ def motif_pvalues(npz_path: Path):
     return region_index, position, out
 
 
+def read_conversion_manifest(path: Path) -> dict:
+    """{motif: {group: countDist md5}} as recorded by countdist_to_npz.py."""
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    return {r["motif"]: {g: r[g + "_source_md5"] for g in io.GROUPS} for r in rows}
+
+
+def read_manifest(path: Path):
+    """The verified list as [(path, bytes, md5, kind)]: the wrapper's only deletion source."""
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        header = handle.readline().rstrip("\n").split("\t")
+        if tuple(header) != MANIFEST_COLUMNS:
+            raise ValueError("unexpected verified-temporaries header in " + str(path))
+        out = []
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            out.append((Path(fields[0]), int(fields[1]), fields[2], fields[3]))
+    return out
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arm", required=True)
     parser.add_argument("--released-root", required=True,
-                        help="root holding <arm>/pVal.{up,dn}.vs.bg.RNAmap.txt")
+                        help="root holding <arm>/pVal.{up,dn}.vs.bg.RNAmap.txt and <arm>/temp/")
     parser.add_argument("--counts-root", required=True,
-                        help="root holding <arm>/*.counts.npz from countdist_to_npz.py")
-    parser.add_argument("--positional-sample", type=int, default=200)
+                        help="root holding <arm>/*.counts.npz and conversion_manifest.tsv from countdist_to_npz.py")
     args = parser.parse_args(argv)
 
     arm_dir = Path(args.released_root) / args.arm
+    temp_dir = arm_dir / "temp"
     out_dir = Path(args.counts_root) / args.arm
+    manifest_path = out_dir / MANIFEST_NAME
+    if manifest_path.exists():
+        manifest_path.unlink()  # a stale list must never outlive a new verification
     log = open(out_dir / "command.log", "a", encoding="utf-8")
 
     def emit(message):
@@ -78,126 +107,137 @@ def main(argv=None) -> int:
         log.write(message + "\n")
         log.flush()
 
-    emit("start={} cmd={}".format(time.strftime("%Y-%m-%dT%H:%M:%S"),
-                                  " ".join([sys.executable] + sys.argv)))
-    roots = {d: io.read_root_table(arm_dir / ("pVal." + d + ".vs.bg.RNAmap.txt"))
-             for d in ("up", "dn")}
+    emit("start={} cmd={}".format(time.strftime("%Y-%m-%dT%H:%M:%S"), " ".join(
+        [sys.executable] + (sys.argv if argv is None else [__file__] + list(argv)))))
+    failures = []
+    roots = {d: io.read_root_table(arm_dir / ("pVal." + d + ".vs.bg.RNAmap.txt")) for d in ("up", "dn")}
     motifs = sorted(p.name[: -len(".counts.npz")] for p in out_dir.glob("*.counts.npz"))
-    missing = [m for d in ("up", "dn") for m in roots[d] if m not in set(motifs)]
-    if missing:
-        raise SystemExit("root table motifs absent from archives: " + ", ".join(sorted(set(missing))))
+    if not motifs:
+        failures.append("no *.counts.npz archives in " + str(out_dir))
+    for d in ("up", "dn"):
+        if set(roots[d]) != set(motifs):
+            failures.append("motif set differs between the archives and the {} root table: only in the root "
+                            "table {}, only in the archives {}".format(
+                                d, sorted(set(roots[d]) - set(motifs))[:5], sorted(set(motifs) - set(roots[d]))[:5]))
+    conversion_path = out_dir / "conversion_manifest.tsv"
+    conversion = read_conversion_manifest(conversion_path) if conversion_path.is_file() else {}
+    if not conversion:
+        failures.append("conversion_manifest.tsv absent or empty; countDist provenance cannot be checked")
 
-    rng = np.random.default_rng(SEED)
-    recomputed = {}
-    root_rows = []
-    worst_root = (0.0, None)
-    exact_root = 0
+    root_rows, position_rows, verified = [], [], []
+    n_root = exact_root = n_position = exact_position = 0
     started = time.perf_counter()
     for index, motif in enumerate(motifs, 1):
         region_index, position, pvalues = motif_pvalues(out_dir / (motif + ".counts.npz"))
-        recomputed[motif] = (region_index, position, pvalues)
+        motif_ok = True
+        positional = []
         for direction in ("up", "dn"):
             for region_id, region in enumerate(io.REGIONS):
-                mask = region_index == region_id
-                mine = float(pvalues[direction][mask].min())
-                released = roots[direction][motif][region]
-                gap = log10_gap(mine, released)
-                exact_root += int(mine == released)
-                if gap > worst_root[0]:
-                    worst_root = (gap, (motif, direction, region, mine, released))
-                root_rows.append((motif, direction, region, released, mine, gap))
+                mine = float(pvalues[direction][region_index == region_id].min())
+                released = roots[direction].get(motif, {}).get(region, math.nan)
+                n_root += 1
+                if mine == released:
+                    exact_root += 1
+                else:
+                    motif_ok = False
+                    root_rows.append((motif, direction, region, released, mine, log10_gap(mine, released)))
+            path = temp_dir / (motif + ".pVal." + direction + ".vs.bg.txt")
+            if not path.is_file():
+                failures.append("positional table absent: " + str(path))
+                motif_ok = False
+                continue
+            regions, positions, released = io.read_positional_p(path)
+            order = np.array([io.REGIONS.index(r) for r in regions], dtype=np.int8)
+            if not (np.array_equal(order, region_index) and np.array_equal(positions, position)):
+                failures.append("positional axis mismatch: " + str(path))
+                motif_ok = False
+                continue
+            mine = np.asarray(pvalues[direction], dtype=np.float64)
+            equal = mine == released
+            n_position += int(equal.size)
+            exact_position += int(equal.sum())
+            for slot in np.flatnonzero(~equal)[:20]:
+                position_rows.append((motif, direction, io.REGIONS[order[slot]], int(positions[slot]),
+                                      float(released[slot]), float(mine[slot]),
+                                      log10_gap(float(mine[slot]), float(released[slot]))))
+            if equal.all():
+                positional.append((path, "positional_pvalue"))
+            else:
+                motif_ok = False
+        recorded = conversion.get(motif)
+        sources = []
+        for group in io.GROUPS:
+            source = temp_dir / (motif + ".countDist." + group + ".txt")
+            if recorded is None or not source.is_file():
+                failures.append("countDist absent or not in conversion_manifest.tsv: " + str(source))
+                motif_ok = False
+            elif io.md5(source) != recorded[group]:
+                failures.append("countDist changed since conversion: " + str(source))
+                motif_ok = False
+            else:
+                sources.append((source, "countDist"))
+        if motif_ok:
+            verified += positional + sources
         if index % 25 == 0 or index == len(motifs):
-            emit("  root check {}/{} motifs, {:.1f}s".format(
-                index, len(motifs), time.perf_counter() - started))
+            emit("  exact check {}/{} motifs, {:.1f}s".format(index, len(motifs), time.perf_counter() - started))
 
-    n_root = len(root_rows)
-    root_pass = worst_root[0] <= ROOT_TOLERANCE
-
-    sample_rows = []
-    worst_sample = (0.0, None)
-    picks = rng.choice(len(motifs) * 2, size=min(args.positional_sample, len(motifs) * 2),
-                       replace=False)
-    for pick in picks:
-        motif = motifs[int(pick) // 2]
-        direction = ("up", "dn")[int(pick) % 2]
-        regions, positions, released = io.read_positional_p(
-            arm_dir / "temp" / (motif + ".pVal." + direction + ".vs.bg.txt"))
-        region_index, position, pvalues = recomputed[motif]
-        order = np.array([io.REGIONS.index(r) for r in regions], dtype=np.int8)
-        if not (np.array_equal(order, region_index) and np.array_equal(positions, position)):
-            raise SystemExit("positional axis mismatch for " + motif + " " + direction)
-        slot = int(rng.integers(0, released.size))
-        mine = float(pvalues[direction][slot])
-        gap = log10_gap(mine, float(released[slot]))
-        if gap > worst_sample[0]:
-            worst_sample = (gap, (motif, direction, io.REGIONS[order[slot]], int(positions[slot])))
-        sample_rows.append((motif, direction, io.REGIONS[order[slot]], int(positions[slot]),
-                            float(released[slot]), mine, gap))
-    sample_pass = worst_sample[0] <= ROOT_TOLERANCE
+    root_pass = n_root > 0 and exact_root == n_root
+    position_pass = n_position > 0 and exact_position == n_position
+    passed = root_pass and position_pass and not failures
 
     probe = []
-    probe_motif = "QKI.ACTAAC[ACG]" if "QKI.ACTAAC[ACG]" in set(motifs) else motifs[0]
-    with np.load(out_dir / (probe_motif + ".counts.npz"), allow_pickle=False) as data:
-        bg = io.group_csr(data, "bg").toarray()
-        fg = io.group_csr(data, "dn").toarray()
-    region_index, position, pvalues = recomputed[probe_motif]
-    window = int(np.argmin(pvalues["dn"]))
-    for label, kwargs in (("scipy default", {}),
-                          ("use_continuity=False", {"use_continuity": False})):
-        value = float(mannwhitneyu(fg[:, window], bg[:, window],
-                                   alternative="greater", **kwargs).pvalue)
-        probe.append((label, value, log10_gap(value, float(pvalues["dn"][window]))))
+    if motifs:
+        probe_motif = "QKI.ACTAAC[ACG]" if "QKI.ACTAAC[ACG]" in set(motifs) else motifs[0]
+        with np.load(out_dir / (probe_motif + ".counts.npz"), allow_pickle=False) as data:
+            bg = io.group_csr(data, "bg").toarray()
+            fg = io.group_csr(data, "dn").toarray()
+        _, _, pvalues = motif_pvalues(out_dir / (probe_motif + ".counts.npz"))
+        window = int(np.argmin(pvalues["dn"]))
+        for label, kwargs in (("scipy default", {}), ("use_continuity=False", {"use_continuity": False})):
+            value = float(mannwhitneyu(fg[:, window], bg[:, window], alternative="greater", **kwargs).pvalue)
+            probe.append((label, value, log10_gap(value, float(pvalues["dn"][window]))))
 
     with open(out_dir / "detail_root_comparison.tsv", "w", newline="\n", encoding="utf-8") as handle:
         handle.write("motif\tdirection\tregion\treleased_p\trecomputed_p\tabs_log10_gap\n")
         for row in root_rows:
             handle.write("\t".join(repr(v) if isinstance(v, float) else str(v) for v in row) + "\n")
-    with open(out_dir / "detail_positional_sample.tsv", "w", newline="\n", encoding="utf-8") as handle:
+    with open(out_dir / "detail_positional_mismatches.tsv", "w", newline="\n", encoding="utf-8") as handle:
         handle.write("motif\tdirection\tregion\tposition\treleased_p\trecomputed_p\tabs_log10_gap\n")
-        for row in sample_rows:
+        for row in position_rows:
             handle.write("\t".join(repr(v) if isinstance(v, float) else str(v) for v in row) + "\n")
 
     lines = [
-        "# Stage A verification - " + args.arm,
-        "",
+        "# Archive verification (exact) - " + args.arm, "",
         "Recomputed from `" + str(out_dir) + "` archives only; released tables read, never written.",
         "Statistic: tie-corrected normal approximation with continuity correction, one-sided "
         "changed > background, non-finite replaced by 1.0 (the released engine convention).",
-        "",
-        "| check | n compared | max abs log10 p gap | exact bit-for-bit | verdict |",
-        "|---|---|---|---|---|",
-        "| root tables (126 motifs x 8 sub-regions x 2 directions) | {} | {:.3e} | {} | {} |".format(
-            n_root, worst_root[0], exact_root, "PASS" if root_pass else "FAIL"),
-        "| per-position sample from temp pVal files | {} | {:.3e} | {} | {} |".format(
-            len(sample_rows), worst_sample[0],
-            sum(1 for r in sample_rows if r[4] == r[5]), "PASS" if sample_pass else "FAIL"),
-        "",
-        "Tolerance: max abs log10 p gap <= {:g}.".format(ROOT_TOLERANCE),
-        "",
-        "## Continuity setting of the released engine",
-        "",
-        "Probe: {} direction dn, window index {} of the 1200-position axis.".format(
-            probe_motif, window),
-        "",
-        "| scipy call | p | abs log10 gap to recomputed |",
-        "|---|---|---|",
+        "Criterion: exact float equality for every value; no tolerance.", "",
+        "| check | n compared | n exactly equal | verdict |", "|---|---|---|---|",
+        "| root tables ({} motifs x 8 sub-regions x 2 directions) | {} | {} | {} |".format(
+            len(motifs), n_root, exact_root, "PASS" if root_pass else "FAIL"),
+        "| every per-position value of the temp pVal tables | {} | {} | {} |".format(
+            n_position, exact_position, "PASS" if position_pass else "FAIL"),
+        "| motif set; countDist md5 against conversion_manifest.tsv | - | - | {} |".format(
+            "PASS" if not failures else "FAIL"), "",
     ]
+    lines += ["- " + f for f in failures[:50]]
+    lines += ["", "## Continuity setting of the released engine", "",
+              "| scipy call | p | abs log10 gap to recomputed |", "|---|---|---|"]
     for label, value, gap in probe:
-        lines.append("| mannwhitneyu(alternative='greater', {}) | {:.6e} | {:.3e} |".format(
-            label, value, gap))
-    lines += [
-        "",
-        "The released engine calls scipy with its defaults, so use_continuity=True; the "
-        "recomputation matches that call and not the uncorrected one.",
-        "",
-        "Worst root-table case: " + (
-            "none (all exact)" if worst_root[1] is None else
-            "{} {} {} recomputed {:.6e} vs released {:.6e}".format(*worst_root[1])),
-        "",
-        "Detail: `detail_root_comparison.tsv`, `detail_positional_sample.tsv`.",
-        "Generated " + time.strftime("%Y-%m-%dT%H:%M:%S") + "; seed " + str(SEED) + ".",
-    ]
+        lines.append("| mannwhitneyu(alternative='greater', {}) | {:.6e} | {:.3e} |".format(label, value, gap))
+    lines += ["", "Deletion list: " + ("`{}` ({} files).".format(MANIFEST_NAME, len(verified)) if passed else
+                                      "none written; verification did not pass, so nothing may be deleted."),
+              "Detail: `detail_root_comparison.tsv`, `detail_positional_mismatches.tsv` (mismatches only).",
+              "Generated " + time.strftime("%Y-%m-%dT%H:%M:%S") + "."]
     (out_dir / "VERIFY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if passed:
+        partial = manifest_path.with_name(MANIFEST_NAME + ".partial")
+        with open(partial, "w", newline="\n", encoding="utf-8") as handle:
+            handle.write("\t".join(MANIFEST_COLUMNS) + "\n")
+            for path, kind in verified:
+                handle.write("{}\t{}\t{}\t{}\n".format(path.resolve(), path.stat().st_size, io.md5(path), kind))
+        os.replace(partial, manifest_path)
 
     with open(out_dir / "versions.txt", "a", encoding="utf-8") as handle:
         handle.write("verify_script\t{}\n".format(Path(__file__).resolve()))
@@ -209,13 +249,15 @@ def main(argv=None) -> int:
         for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
             handle.write("verify_{}\t{}\n".format(var, os.environ.get(var, "unset")))
 
-    emit("root: n={} max_log10_gap={:.3e} exact={} verdict={}".format(
-        n_root, worst_root[0], exact_root, "PASS" if root_pass else "FAIL"))
-    emit("positional sample: n={} max_log10_gap={:.3e} verdict={}".format(
-        len(sample_rows), worst_sample[0], "PASS" if sample_pass else "FAIL"))
-    emit("exit={}".format(0 if (root_pass and sample_pass) else 1))
+    emit("root: n={} exact={} verdict={}".format(n_root, exact_root, "PASS" if root_pass else "FAIL"))
+    emit("positional: n={} exact={} verdict={}".format(n_position, exact_position,
+                                                       "PASS" if position_pass else "FAIL"))
+    for failure in failures[:10]:
+        emit("FAIL " + failure)
+    emit("verified temporaries listed: {}".format(len(verified) if passed else 0))
+    emit("exit={}".format(0 if passed else 1))
     log.close()
-    return 0 if (root_pass and sample_pass) else 1
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ Status key:
 | `build_event_sets.py` | Portable stdlib Rule-A pre-split builder, with eight-column coordinates and a gate ledger | inputs | CANONICAL (portable) |
 | `build_event_sets_lab_full.py` | The pandas lab builder behind the lab event sets: rule A, frozen rule B, and `--vast-conf effect-only` for ruleBeffect. Needs `requirements-lab-full.txt` | inputs | CANONICAL (lab) |
 | `countdist_to_npz.py` | Packs a released run's `temp/*.countDist.*.txt` into per-motif `*.counts.npz` archives | main layer | CANONICAL |
-| `verify_ranksum_archives.py` | Recomputes every released root p and a seeded sample of per-position p from the archives, and fails on mismatch | main layer | CANONICAL |
+| `verify_ranksum_archives.py` | Recomputes every released root p and every per-position p from the archives, requires exact float equality, and writes `verified_temporaries.tsv`, the only list the wrapper deletes from | main layer | CANONICAL |
 | `rmaps_countdist_io.py` | Shared readers and the released rank-sum kernel | library | CANONICAL |
 | `calibrate_ranksum_v2.py` | Calibration v2.1, which gives the p and q to report: target-exon cluster permutation, two stages, RBP-level min-P, and the unique-k-mer family | supplement | CANONICAL |
 | `rmaps_calib_v2_lib.py` | Cluster drawer, RBP min-P / max-z / mean-z and k-mer grouping for v2 | library | CANONICAL |

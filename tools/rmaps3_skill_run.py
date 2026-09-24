@@ -318,24 +318,41 @@ def convert_and_verify(args, engine_out: Path, out: Path, log: Logger, env: dict
     if args.keep_temp:
         result["reason"] = "--keep-temp given; verified temporaries kept"
         return counts_root, result
-    manifest = out / "logs" / "temp_deletion.log"
+    deleted, total = delete_verified_temporaries(
+        counts_root / args.arm / verify_ranksum_archives.MANIFEST_NAME, temp_dir,
+        out / "logs" / "temp_deletion.log")
+    result["deleted_files"], result["deleted_bytes"] = deleted, total
+    result["reason"] = f"deleted after verification; inventory in {out / 'logs' / 'temp_deletion.log'}"
+    log(f"deleted {deleted} verified temporaries ({total / 1e9:.2f} GB), exactly the verifier's list")
+    return counts_root, result
+
+
+def delete_verified_temporaries(manifest: Path, temp_dir: Path, inventory: Path):
+    """Delete exactly the files the verifier listed, each still byte-identical to its listed md5.
+
+    Nothing outside the list is touched, and nothing is deleted when the list is absent, names a file
+    outside temp_dir, or any listed file changed since verification: every check runs before the
+    first deletion."""
+    import verify_ranksum_archives
+    if not manifest.is_file():
+        raise RuntimeError(f"verification passed but wrote no deletion list: {manifest}; nothing deleted")
+    listed = verify_ranksum_archives.read_manifest(manifest)
+    root = temp_dir.resolve()
+    for path, size, digest, _ in listed:
+        resolved = path.resolve()
+        if resolved.parent != root:
+            raise RuntimeError(f"deletion list names a file outside {root}: {path}; nothing deleted")
+        if not resolved.is_file() or resolved.stat().st_size != size or md5(resolved) != digest:
+            raise RuntimeError(f"{path} changed since verification; nothing deleted")
     deleted, total = 0, 0
-    with open(manifest, "w", encoding="utf-8") as handle:
-        handle.write("path\tbytes\tmd5\n")
-        for path in sorted(temp_dir.iterdir()):
-            if not path.is_file():
-                continue
-            if not (".countDist." in path.name or ".pVal." in path.name):
-                continue
-            size = path.stat().st_size
-            handle.write(f"{path}\t{size}\t{md5(path)}\n")
-            path.unlink()
+    with open(inventory, "w", encoding="utf-8") as handle:
+        handle.write("path\tbytes\tmd5\tkind\n")
+        for path, size, digest, kind in listed:
+            handle.write(f"{path}\t{size}\t{digest}\t{kind}\n")
+            path.resolve().unlink()
             deleted += 1
             total += size
-    result["deleted_files"], result["deleted_bytes"] = deleted, total
-    result["reason"] = f"deleted after verification; inventory in {manifest}"
-    log(f"deleted {deleted} verified temporaries ({total / 1e9:.2f} GB); inventory {manifest}")
-    return counts_root, result
+    return deleted, total
 
 
 # ------------------------------------------------------------------ quick summary
