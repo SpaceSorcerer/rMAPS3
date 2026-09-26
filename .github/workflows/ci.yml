@@ -106,6 +106,8 @@ jobs:
       - name: Test suite
         env:
           RMAPS_FORCE_MOTIF_FALLBACK: "1"
+          # The released-engine clone needs no LFS test data and this checkout has none to smudge from.
+          GIT_LFS_SKIP_SMUDGE: "1"
           OMP_NUM_THREADS: "2"
           OPENBLAS_NUM_THREADS: "2"
           MKL_NUM_THREADS: "2"
