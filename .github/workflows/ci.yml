@@ -85,10 +85,12 @@ jobs:
 
       - name: Arial for the figure layout audit
         run: |
-          echo "ttf-mscorefonts-installer msttcorefonts/accept-mscorefonts-eula select true" | sudo debconf-set-selections
+          # The preinst reads msttcorefonts/accepted-mscorefonts-eula; "accept-" is ignored and no font is installed.
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
           sudo apt-get update -q
           sudo apt-get install -y -q ttf-mscorefonts-installer fontconfig
           fc-cache -f
+          fc-list | grep -q "/Arial.ttf"
 
       - name: Set up Python
         uses: actions/setup-python@v5
