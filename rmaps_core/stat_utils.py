@@ -28,6 +28,10 @@ METHOD_HEADERS = {
 }
 
 
+class StatisticUnavailable(ValueError):
+    """The test is undefined for these observations; callers report NA with this reason, never p=1."""
+
+
 def supported_stat_methods() -> tuple[str, ...]:
     return (
         "fisher",
@@ -65,20 +69,20 @@ def _mannwhitney_greater_pvalue(values_one: Sequence[float], values_two: Sequenc
 def _brunnermunzel_greater_pvalue(values_one: Sequence[float], values_two: Sequence[float]) -> float:
     # AUDIT F14: undefined rank-test variance is an error, never evidence of p=1.
     if len(values_one) < 2 or len(values_two) < 2:
-        raise ValueError("Brunner-Munzel requires at least two observations per group")
+        raise StatisticUnavailable("Brunner-Munzel requires at least two observations per group")
 
     if len(set(values_one)) < 2 or len(set(values_two)) < 2:
-        raise ValueError("Brunner-Munzel requires nonconstant observations in each group")
+        raise StatisticUnavailable("Brunner-Munzel requires nonconstant observations in each group")
 
     pooled = list(values_one) + list(values_two)
     if len(set(pooled)) < 2:
-        raise ValueError("Brunner-Munzel pooled observations are constant")
+        raise StatisticUnavailable("Brunner-Munzel pooled observations are constant")
 
     # Reject effectively undefined variance instead of manufacturing a p-value.
     arr1 = np.asarray(values_one, dtype=float)
     arr2 = np.asarray(values_two, dtype=float)
     if np.std(arr1) < 1e-10 or np.std(arr2) < 1e-10:
-        raise ValueError("Brunner-Munzel group variance is too small")
+        raise StatisticUnavailable("Brunner-Munzel group variance is too small")
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -154,7 +158,7 @@ def compute_locus_pvalue(
     clean_two = _sanitize_values(values_two)
 
     if not clean_one or not clean_two:
-        raise ValueError("Statistical comparison has an empty eligible group")
+        raise StatisticUnavailable("Statistical comparison has an empty eligible group")
 
     try:
         if method == "mannwhitney_greater":
@@ -164,5 +168,24 @@ def compute_locus_pvalue(
         if method == "permutation_one_sided":
             return _clamp_pvalue(_permutation_one_sided_pvalue(clean_one, clean_two))
         return _clamp_pvalue(_fisher_greater_pvalue(clean_one, clean_two, fisher_scale))
+    except StatisticUnavailable as exc:
+        raise StatisticUnavailable(f"{method}: {exc}") from exc
     except Exception as exc:
         raise ValueError(f"{method} statistical comparison failed: {exc}") from exc
+
+
+def locus_pvalue_or_na(
+    values_one: Sequence[float],
+    values_two: Sequence[float],
+    stat_method: str | None,
+    fisher_scale: float = 1.0,
+) -> tuple[float, str]:
+    """compute_locus_pvalue with an undefined test returned as (NaN, reason); every other failure still raises."""
+    try:
+        return compute_locus_pvalue(values_one, values_two, stat_method, fisher_scale=fisher_scale), ""
+    except StatisticUnavailable as exc:
+        return float("nan"), str(exc)
+
+
+def format_pvalue(pvalue: float) -> str:
+    return str(pvalue) if np.isfinite(pvalue) else "NA"

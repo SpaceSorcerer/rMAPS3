@@ -327,6 +327,11 @@ Default thresholds by event:
 - `se`, `a3ss`, `ri`, `mxe`: `sigFDR=0.05`, `sigDeltaPSI=0.05`
 - `a5ss`: `sigFDR=0.005`, `sigDeltaPSI=0.01`
 
+<!-- AUDIT F14 (CLIP), 2026-09-26. -->
+`pVal.up.vs.bg.RNAmap.txt` and `pVal.dn.vs.bg.RNAmap.txt` carry a fourth column, `reason`. A window whose test is
+undefined (for Brunner-Munzel, a constant group) is written `NA` with the reason, never p=1; any other statistical
+failure stops the run.
+
 ### Event Details and Examples
 
 #### `se` (Skipped Exon)

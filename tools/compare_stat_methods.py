@@ -41,7 +41,7 @@ POOLS = list(POOL_TO_REGIONS)
 # name -> (path template, observation scale, closeness to the authors' tool, validity note)
 METHODS = {
     "released_fisher": (
-        r"{runs}\{arm}\released_b9a9dce\pVal.{direction}.vs.bg.RNAmap.txt",
+        r"{runs}/{arm}/released_b9a9dce/pVal.{direction}.vs.bg.RNAmap.txt",
         "motif hit counts in a 2x2 table",
         "the authors' default; the tool as released",
         "INVALID sampling model: an exon with k hits contributes k successes and "
@@ -49,7 +49,7 @@ METHODS = {
         "count of independent Bernoulli exons and repetitive motifs are inflated.",
     ),
     "released_mannwhitney": (
-        r"{stat}\released_mannwhitney\{arm}\pVal.{direction}.vs.bg.RNAmap.txt",
+        r"{stat}/released_mannwhitney/{arm}/pVal.{direction}.vs.bg.RNAmap.txt",
         "per-exon hit counts",
         "built-in --stat-method option of the released tool",
         "Correct sampling unit (one observation per eligible exon) but the engine "
@@ -60,14 +60,14 @@ METHODS = {
         "stochastic dominance, not a rate.",
     ),
     "audited_fisher_binary": (
-        r"{runs}\{arm}\fisher_c34776b\pVal.{direction}.vs.bg.RNAmap.txt",
+        r"{runs}/{arm}/fisher_c34776b/pVal.{direction}.vs.bg.RNAmap.txt",
         "binary exon carries motif / does not",
         "audited engine, same test family as the default",
         "Valid: exact Fisher on one Bernoulli observation per eligible exon; "
         "discards motif density entirely.",
     ),
     "audited_mannwhitney": (
-        r"{stat}\audited_mannwhitney\{arm}\pVal.{direction}.vs.bg.RNAmap.txt",
+        r"{stat}/audited_mannwhitney/{arm}/pVal.{direction}.vs.bg.RNAmap.txt",
         "binarized observations (WindowCounts.observations() emits 1s and 0s)",
         "built-in option of the audited engine",
         "Not count-aware and not calibrated: the audited engine binarizes before "
@@ -76,7 +76,7 @@ METHODS = {
         "error, which is what normal_approximation_gap.tsv measures.",
     ),
     "mw_counts": (
-        r"{stat}\count_aware\{arm}\mw_counts_root_tables.{direction}.vs.bg.tsv",
+        r"{stat}/count_aware/{arm}/mw_counts_root_tables.{direction}.vs.bg.tsv",
         "per-exon hit counts reconstructed from stored hit spans",
         "downstream re-computation from the audited engine's positional archives",
         "Correct sampling unit and tie correction, and it reproduces the engines' "
@@ -85,7 +85,7 @@ METHODS = {
         "absolute p-value.",
     ),
     "poisson_rate": (
-        r"{stat}\count_aware\{arm}\poisson_rate_root_tables.{direction}.vs.bg.tsv",
+        r"{stat}/count_aware/{arm}/poisson_rate_root_tables.{direction}.vs.bg.tsv",
         "total hits per eligible exon (rate)",
         "downstream re-computation from the audited engine's positional archives",
         "Exact conditional on the total hit count, so it is calibrated in the sparse "

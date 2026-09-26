@@ -78,6 +78,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # tests/test_artifact_inventory.py and test_full_mode_controls.py check out the released engine
+          # commit (RELEASED_ENGINE_COMMIT) from a shared clone of this repository; a shallow clone lacks it.
+          fetch-depth: 0
 
       - name: Arial for the figure layout audit
         run: |

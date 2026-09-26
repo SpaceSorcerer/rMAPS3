@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pyx import *
 from scipy import stats
 from rmaps_core.drawutils import export_canvas_outputs, export_text_rnamap_fallback, suppress_pyx_text_cleanup
-from rmaps_core.stat_utils import compute_locus_pvalue, normalize_stat_method, pvalue_header_label
+from rmaps_core.stat_utils import format_pvalue, locus_pvalue_or_na, normalize_stat_method, pvalue_header_label
 #import fisher,mne;  ## for FDR calculation
 #
 #
@@ -257,17 +257,22 @@ def processExons(exons,peaks,CD,intronLen=250,exonLen=50,winSize=50,step=10): ##
   logging.debug("Done processing exons in a group");
   return rVal; ## list with total count for each region
 
+pvalue_reasons = {} ## AUDIT F14 (CLIP): id(test_p) -> {(region, locus): why the test is NA}
+
 def computePValues(cdist_one, cdist_two, test_p): ## count p value for one vs. two
   myFactor = 1.0 * wLen
+  reasons = pvalue_reasons.setdefault(id(test_p), {})
   for zz in sorted(cdist_one):
     test_p[zz] = {}
     for locus in range(len(cdist_one[zz])):
-      test_p[zz][locus] = compute_locus_pvalue(
+      test_p[zz][locus], reason = locus_pvalue_or_na(
         cdist_one[zz][locus],
         cdist_two[zz][locus],
         stat_method,
         fisher_scale=myFactor,
       )
+      if reason:
+        reasons[(zz, locus)] = reason
 
 
 def computeWilcoxonP(cdist_one, cdist_two, test_p):
@@ -287,12 +292,13 @@ def printCountDist(cds, desFile, exNum): ## print count distribution on the dest
 def printPval(pdic, dFile, eNum): ## print p values per position
   rName={0:'R1', 1:'R2', 2:'R3', 3:'R4', 4:'R5', 5:'R6', 6:'R7', 7:'R8'};
   header = pvalue_header_label(stat_method)
-  dFile.write('Region\tposition\t' + header + '\n');
+  dFile.write('Region\tposition\t' + header + '\treason\n');
+  reasons = pvalue_reasons.get(id(pdic), {})
   if eNum==0: ## no exons in the group
     return;
   for zz in range(8): ## for 8 regions
     for locus in range(len(pdic[zz])):
-      dFile.write(rName[zz]+'\t'+str(locus)+'\t'+str(pdic[zz][locus])+'\n');
+      dFile.write(rName[zz]+'\t'+str(locus)+'\t'+format_pvalue(pdic[zz][locus])+'\t'+reasons.get((zz, locus), '')+'\n');
 
 
 def printCounts(counts, dFile, eNum): ## print counts on the destination file, eNum is the nubmer of exons in the group

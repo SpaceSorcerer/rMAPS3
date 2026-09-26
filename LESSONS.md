@@ -148,6 +148,9 @@ and 09-22 addenda. Dated facts keep their dates.
   It refuses before writing anything. The lab values live in the skills.
 - **Two v1 summary schemas.** The 2026-09-20 lab v1 summaries carry `power_label` and `n_changed_*`, and the fork's `calibrate_ranksum.py` does not. `motif_scores_ranksum.py` reads both.
 - **`lab_full` needs pandas.** `build_event_sets_lab_full.py` needs pandas (`tools/requirements-lab-full.txt`), which `E:\rmaps_venv` lacks.
+- **CLIP maps share `rmaps_core/stat_utils.py` (2026-09-26).** The SE motif engine never calls `compute_locus_pvalue`; only `bin/RNA.map.noWiggle.*.py` do. The F14 change (undefined test raises instead of returning p=1) therefore landed only in the CLIP path, which had no handler, and every CLIP Brunner-Munzel run on sparse peaks died. The exit code 247 in GitHub Actions is `sys.exit(-9)` in `legacy/clipSeq*.py`, not SIGKILL or the runner's OOM killer: peak memory of that step was measured equal to upstream `main`. Undefined tests now raise `StatisticUnavailable`, and the CLIP scripts write `NA` plus a `reason` column; every other statistical failure still raises. Test: `tests/test_clip_unavailable_na.py`.
+- **Path templates.** A backslash in a path template is a literal filename character on Linux. `tools/compare_stat_methods.py` built every input path with `\` and so found nothing under CI; templates use `/`, which `pathlib` also accepts on Windows.
+- **Released-engine fixtures need full history.** Tests that check out `RELEASED_ENGINE_COMMIT` from a `--shared` clone of this repository fail on a shallow checkout; the `lab-fork` CI job uses `fetch-depth: 0`.
 
 ## 6. Provenance of the ports (2026-09-24)
 
@@ -155,7 +158,7 @@ and 09-22 addenda. Dated facts keep their dates.
   - The duplication table (7 arms), the A/B/C comparison and the length comparison are byte-identical to the published TSVs.
   - Treatment B, treatment C and the length-matched run on QKI_KO_B are byte-identical to the original scripts at 200/1,000 permutations.
   - Motif scores on QKI_KO_B are byte-identical to the published v2 tables.
-- **Repo-relative readers.** `rank_stability.py` and `summarize_rmaps_regions_lab_v5.py` now resolve the engine and alias table inside this checkout. The engine is unchanged since `3faead9`. The QKI_KO_B rerun is recorded in `docs/CONSOLIDATION_REPORT_2026-09-24.md`.
+- **Repo-relative readers.** `rank_stability.py` and `summarize_rmaps_regions_lab_v5.py` now resolve the engine and alias table inside this checkout. The engine is unchanged since `3faead9`; on 2026-09-26 only the CLIP scripts and `rmaps_core/stat_utils.py` changed (section 5), not the SE motif engine. The QKI_KO_B rerun is recorded in `docs/CONSOLIDATION_REPORT_2026-09-24.md`.
 
 ## Evidence read
 
