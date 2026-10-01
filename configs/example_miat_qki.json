@@ -1,0 +1,35 @@
+{
+  "arm": "MIAT_KD_ruleA",
+  "inputs": {
+    "rmats_se": "../inputs/MIAT_KD/SE.MATS.JC.txt",
+    "deseq2": "../inputs/MIAT_KD/DESeq2.csv"
+  },
+  "gates": {
+    "rule": "A",
+    "fdr": 0.05,
+    "abs_dpsi": 0.10,
+    "min_sample_coverage": 10,
+    "base_mean_floor": 50,
+    "expr_unknown": "retain",
+    "background_fdr": 0.5,
+    "treatment_is": "b1"
+  },
+  "genome": {"root": "../references/rmaps_genomes", "build": "hg38"},
+  "motifs": {
+    "known": "../data/knownMotifs.human.mouse.txt",
+    "additional": "../data/ESRP.like.motif.txt"
+  },
+  "engine": {
+    "stat_method": "fisher",
+    "fisher_alternative": "greater",
+    "workers": 4,
+    "window": 50,
+    "step": 1,
+    "intron": 250,
+    "exon": 50,
+    "force_motif_fallback": true
+  },
+  "blas_threads": 4,
+  "summary": {"perms": 2000, "seed": 149, "workers": 1, "chunk_size": 500},
+  "output_root": "../runs/MIAT_KD_ruleA"
+}

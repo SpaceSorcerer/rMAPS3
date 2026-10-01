@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
+import os
+from enum import Enum
 from pathlib import Path
 
 import typer
@@ -55,6 +57,11 @@ KEEP_TEMP_OPTION = typer.Option(
     "--keep-temp",
     help="Keep output/temp on successful runs (temp is always kept on failures).",
 )
+
+
+class FisherAlternative(str, Enum):
+    greater = "greater"
+    two_sided = "two-sided"
 
 
 def version_callback(value: bool) -> None:
@@ -168,6 +175,9 @@ def motif_map_se(
         "--window",
         help="Window size for motif scanning.",
     ),
+    # AUDIT R1: unspecified exon width follows --window without changing its default.
+    exon_window: int | None = typer.Option(None, "--exon-window", min=1,
+        help="SE exon window width; defaults to --window (one window at exon=window=50)."),
     step: int = typer.Option(
         1,
         "--step",
@@ -193,7 +203,17 @@ def motif_map_se(
     stat_method: str = STAT_METHOD_OPTION,
     stat_permutations: int | None = STAT_PERMUTATIONS_OPTION,
     stat_seed: int | None = STAT_SEED_OPTION,
-    keep_temp: bool = KEEP_TEMP_OPTION,
+    # AUDIT F7: SE positional tables are retained by default.
+    keep_temp: bool = typer.Option(False, "--keep-temp", help="Compatibility option; SE temp is retained by default."),
+    delete_temp: bool = typer.Option(False, "--delete-temp", help="Delete registered SE temp tables after hashing; retain sparse positional hits."),
+    # AUDIT F8: reuse of an existing output directory requires explicit consent.
+    overwrite: bool = typer.Option(False, "--overwrite", help="Archive previous registered run outputs before reusing the directory."),
+    # AUDIT F13: disjoint event sets are the default.
+    allow_overlap: bool = typer.Option(False, "--allow-overlap", help="Allow and report events shared between input sets."),
+    # AUDIT F15: expose the Fisher tail rather than fixing it internally.
+    fisher_alternative: FisherAlternative = typer.Option(FisherAlternative.greater, "--fisher-alternative"),
+    # AUDIT F20: avoid oversubscribing shared workstations.
+    workers: int = typer.Option(min(4, max(1, (os.cpu_count() or 1) - 1)), "--workers", min=1),
 ) -> None:
     """
     Generate motif maps for SE events.
@@ -222,6 +242,12 @@ def motif_map_se(
         stat_permutations=stat_permutations,
         stat_seed=stat_seed,
         keep_temp=keep_temp,
+        delete_temp=delete_temp,
+        overwrite=overwrite,
+        allow_overlap=allow_overlap,
+        fisher_alternative=fisher_alternative.value,
+        workers=workers,
+        exon_window=exon_window,
     )
     raise typer.Exit(code=code)
 

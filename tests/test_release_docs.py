@@ -1,0 +1,155 @@
+"""Release documentation contract: cited documents are tracked, CI runs the lab suite, the report states HEAD's count."""
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+REPORT = ROOT / "docs" / "CONSOLIDATION_REPORT_2026-09-24.md"
+SUITE = ["tests", "--ignore=tests/legacy", "--ignore=tests/test_motif.py"]
+
+
+def tracked(relative: str) -> bool:
+    proc = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--error-unmatch", relative],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+def test_consolidation_report_cited_by_lessons_is_tracked():
+    text = (ROOT / "LESSONS.md").read_text(encoding="utf-8")
+    cited = re.findall(r"`([^`]*CONSOLIDATION_REPORT_2026-09-24\.md)`", text)
+    assert cited, "LESSONS.md must cite the consolidation report"
+    for path in cited:
+        assert tracked(path), f"LESSONS.md cites {path}, which a clone does not contain"
+
+
+def test_ci_lab_job_installs_the_lock_compiles_tools_and_runs_the_suite_as_steps():
+    yaml = pytest.importorskip("yaml")          # PyYAML is pinned in requirements-lock.txt
+    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    steps = ci["jobs"]["lab-fork"]["steps"]
+    runs = [(i, " ".join(str(s.get("run", "")).split())) for i, s in enumerate(steps)]
+    setup = [s for s in steps if str(s.get("uses", "")).startswith("actions/setup-python")]
+    assert setup and str(setup[0]["with"]["python-version"]) == "3.11"
+    install = [i for i, r in runs if "pip install -r requirements-lock.txt" in r]
+    compile_ = [i for i, r in runs if r == "python -m compileall -q tools"]
+    suite = [i for i, r in runs if r.startswith("python -m pytest -q " + " ".join(SUITE))]
+    assert install and compile_ and suite, runs
+    assert install[0] < compile_[0] < suite[0]
+    assert steps[suite[0]]["env"]["RMAPS_FORCE_MOTIF_FALLBACK"] == "1"
+
+
+def unmet_lock_pins():
+    """Pinned distributions this interpreter lacks or holds at another version."""
+    import importlib.metadata as metadata
+    unmet = []
+    for line in (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.startswith("#"):
+            name, version = line.strip().split("==")
+            try:
+                if metadata.version(name) != version:
+                    unmet.append(line)
+            except metadata.PackageNotFoundError:
+                unmet.append(line)
+    return unmet
+
+
+def test_consolidation_report_states_the_test_count_pytest_collects_at_head():
+    """The count is that of the lock environment: a pandas-less interpreter skips a module and collects fewer."""
+    unmet = unmet_lock_pins()
+    if unmet:
+        pytest.skip("counts only in an environment that satisfies requirements-lock.txt; unmet: " + ", ".join(unmet))
+    text = REPORT.read_text(encoding="utf-8")
+    stated = re.search(r"collects \*\*(\d+) tests\*\*", text)
+    assert stated, "the report must state 'collects **N tests**' for the current HEAD"
+    proc = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *SUITE],
+                          cwd=ROOT, capture_output=True, text=True, timeout=600)
+    collected = re.search(r"(\d+) tests? collected", proc.stdout)
+    assert collected, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert int(stated.group(1)) == int(collected.group(1))
+
+
+# ------------------------------------------------------------------ v1.0.1c/d: skills and docs match the wrapper
+# The two lab skills are part of the release contract: a copy of each is committed under docs/skills/ and must be
+# byte-identical to the live skill (RMAPS_SKILLS_DIR, default ~/.claude/skills) wherever that directory exists. On a
+# runner without it (CI) the committed copies alone are checked for the contract. No check skips.
+SKILL_NAMES = ("rmaps3-quick", "rmaps3-full")
+SKILLS_DIR = Path(os.environ.get("RMAPS_SKILLS_DIR", Path.home() / ".claude" / "skills"))
+SKILLS = {name: SKILLS_DIR / name / "SKILL.md" for name in SKILL_NAMES}
+COMMITTED = {name: ROOT / "docs" / "skills" / name / "SKILL.md" for name in SKILL_NAMES}
+GATE_SENTENCE = ("The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the "
+                 "arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer.")
+TWO_STAGE_CLAUSE = "reports its stage-2 p only when its own stage-1 p"
+RETIRED_PHRASES = (
+    "arm-name suffix", "arm suffix", "text after the last `_`", "<name>_<rule>", "needs an arm named",
+    "hard-codes the reli_v121", "is also promoted when any of its motifs", "exactly valid for p",
+    "exact only at or below", "e:/rmaps_venv/", "e:\rmaps_venv\\", "group-triggered promotion is used",
+)
+
+
+def live_skills():
+    """The live skills when the skills directory exists (both must then be present), else {} (CI)."""
+    if not SKILLS_DIR.is_dir():
+        return {}
+    missing = [str(path) for path in SKILLS.values() if not path.is_file()]
+    assert not missing, (f"the skills directory {SKILLS_DIR} exists but lacks the release-contract skills: {missing}")
+    return SKILLS
+
+
+def lab_docs():
+    docs = {"README.md": ROOT / "README.md", "tools/README.md": ROOT / "tools" / "README.md"}
+    docs.update({f"live {k}": v for k, v in live_skills().items()})
+    docs.update({f"docs/skills/{k}": v for k, v in COMMITTED.items()})
+    return {k: v.read_text(encoding="utf-8").replace("\r\n", "\n") for k, v in docs.items()}
+
+
+def lf(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
+def test_committed_skill_copies_are_tracked_lf_and_identical_to_the_live_skills_up_to_line_endings():
+    """The committed copies are LF (.gitattributes: text eol=lf); a live skill on Windows may be CRLF, so the two are
+    compared byte for byte after CRLF -> LF."""
+    for name, committed in COMMITTED.items():
+        assert committed.is_file(), f"{committed} is not in the checkout"
+        assert tracked(committed.relative_to(ROOT).as_posix()), f"{committed} is not tracked"
+        assert b"\r" not in committed.read_bytes(), f"{committed} is not LF"
+    live = live_skills()
+    if not live:
+        print("live skills absent: verified committed copies")
+        return
+    for name, path in live.items():
+        assert lf(COMMITTED[name]) == lf(path), (
+            f"docs/skills/{name}/SKILL.md differs from the live skill {path}; copy the live skill into the repository")
+
+
+def test_docs_and_skills_state_the_gate_rule_contract_and_no_retired_phrase():
+    for name, text in lab_docs().items():
+        assert GATE_SENTENCE in " ".join(text.split()), name
+        low = text.lower()
+        hits = [p for p in RETIRED_PHRASES if p in low]
+        assert not hits, f"{name} still says {hits}"
+
+
+def test_skills_run_venv2_state_4_3_3_the_two_stage_contract_statuses_and_exit_codes():
+    for path in list(live_skills().values()) + list(COMMITTED.values()):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for needed in ("E:/rmaps_venv2/Scripts/python.exe", "4.3.3", "--gate-rule", "`complete` (exit 0)",
+                       "`INCOMPLETE` (exit 4)", "`complete_partial` (exit 0)", "(exit 3)", "`failed` (exit 1)",
+                       '--arm-label "<title>"', "arm_labels_dissertation.tsv"):
+            assert needed in text, (str(path), needed)
+    live = live_skills()
+    for path in [COMMITTED["rmaps3-full"]] + ([live["rmaps3-full"]] if live else []):
+        full = " ".join(path.read_text(encoding="utf-8").split())
+        assert TWO_STAGE_CLAUSE in full and "super-uniform at every α" in full
+    for path in [COMMITTED["rmaps3-quick"]] + ([live["rmaps3-quick"]] if live else []):
+        assert "rmaps3_skill_run.py --verify <OUT_DIR>" in " ".join(path.read_text(encoding="utf-8").split())
+
+
+def test_two_stage_note_calls_tied_permutation_p_conservative_not_uniform():
+    text = (ROOT / "docs" / "two_stage_validity.md").read_text(encoding="utf-8")
+    assert "conservative (super-uniform), not uniform" in text
+    assert "is then uniform, with ties counted against it" not in text
+    assert TWO_STAGE_CLAUSE in text

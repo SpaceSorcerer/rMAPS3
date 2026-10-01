@@ -1,0 +1,4 @@
+# Lab-side full event-set builder (rule A, frozen rule B, relaxed rule B via --vast-conf effect-only).
+# Requires pandas and openpyxl in addition to requirements.txt; the stdlib adapter is tools/build_event_sets.py.
+pandas>=2.0
+openpyxl>=3.1

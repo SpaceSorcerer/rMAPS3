@@ -29,9 +29,10 @@ def test_resolve_user_path_uses_invocation_cwd() -> None:
 
 def test_motif_map_resolves_user_paths_and_runs_from_invocation_cwd() -> None:
     base_cwd = Path.cwd() / "scratch_user_run"
+    # AUDIT S1: this path-wiring unit test uses nonexistent mocked motif inputs.
     with patch("rmaps_core.motif_map_core.maybe_prepare_rmats_input", side_effect=lambda rmats, output: rmats), patch(
         "rmaps_core.motif_map_core.subprocess.run"
-    ) as run_mock:
+    ) as run_mock, patch("rmaps_core.motif_map_core.se_output_targets", return_value=set()) as targets_mock:
         run_mock.return_value.returncode = 0
 
         run_motif_map(
@@ -58,6 +59,9 @@ def test_motif_map_resolves_user_paths_and_runs_from_invocation_cwd() -> None:
         )
 
     cmd = run_mock.call_args.args[0]
+    targets_mock.assert_called_once_with(expected_path(base_cwd, "data/known.txt"),
+                                         expected_path(base_cwd, "motifs.txt"),
+                                         expected_path(base_cwd, "events.tsv"), "NA")
     assert run_mock.call_args.kwargs["cwd"] == base_cwd
     assert cmd[cmd.index("-k") + 1] == expected_path(base_cwd, "data/known.txt")
     assert cmd[cmd.index("-m") + 1] == expected_path(base_cwd, "motifs.txt")

@@ -1,0 +1,13 @@
+table_name	hgnc_symbol	evidence	ambiguity_note
+9G8	SRSF7	HGNC REST search/alias_symbol/9G8 -> SRSF7,SLU7 (queried 2026-09-17)	HGNC lists 9G8 as an alias of both SRSF7 and SLU7; in the SR-protein literature 9G8 denotes SRSF7 (flag: verify before citing); merges with the table's own SRSF7 row
+BRUNOL4	CELF4	HGNC REST search/prev_symbol/BRUNOL4 -> CELF4
+BRUNOL5	CELF5	HGNC REST search/prev_symbol/BRUNOL5 -> CELF5
+BRUNOL6	CELF6	HGNC REST search/prev_symbol/BRUNOL6 -> CELF6
+HNRPLL	HNRNPLL	HGNC REST search/prev_symbol/HNRPLL -> HNRNPLL
+HuR	ELAVL1	HGNC REST search/alias_symbol/HuR and prev_symbol/HuR -> ELAVL1
+PTB	PTBP1	HGNC REST search/prev_symbol/PTB -> PTBP1 (alias_symbol/PTB -> PTBP2)	previous symbol PTB = PTBP1 is the authoritative record; merges with the table's own PTBP1 row
+SF2-ASF	SRSF1	HGNC REST search/alias_symbol/SF2 -> SRSF1; alias_symbol/SF2p33 -> SRSF1; alias_symbol/ASF -> SRSF1,ARSF	the compound label SF2-ASF has no HGNC record of its own; both halves resolve to SRSF1; merges with the table's five SRSF1 rows
+SRp20	SRSF3	HGNC REST search/alias_symbol/SRp20 -> SRSF3
+SRp40	SRSF5	HGNC REST search/alias_symbol/SRp40 -> SRSF5,NOLC1	HGNC lists SRp40 as an alias of both SRSF5 and NOLC1; in the SR-protein literature SRp40 denotes SRSF5 (flag: verify before citing)
+SRp55	SRSF6	HGNC REST search/alias_symbol/SRp55 -> SRSF6
+Tra2-beta	TRA2B	HGNC REST search/alias_symbol/Htra2-beta -> TRA2B; prev_symbol/SFRS10 -> TRA2B	the hyphenated label Tra2-beta has no exact HGNC record; Htra2-beta is the recorded alias

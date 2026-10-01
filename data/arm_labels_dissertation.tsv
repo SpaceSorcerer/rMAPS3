@@ -1,0 +1,8 @@
+arm	arm_label
+MIAT_KD_A	MIAT knockdown (rMATS events)
+MIAT_KD_B	MIAT knockdown (rMATS ∩ VAST-tools concordant events)
+MIAT_KD_Beffect	MIAT knockdown (rMATS ∩ VAST-tools concordant, relaxed rule)
+MIAT_OE_A	MIAT overexpression (rMATS events)
+QKI_KO_A	QKI knockout (rMATS events)
+QKI_KO_B	QKI knockout (rMATS ∩ VAST-tools concordant events)
+QKI_KO_Beffect	QKI knockout (rMATS ∩ VAST-tools concordant, relaxed rule)

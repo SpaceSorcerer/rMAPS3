@@ -7,10 +7,13 @@ from typing import Dict
 import sys
 import subprocess
 import shutil
+import os
+import json
 
 from rmaps_core.input_utils import maybe_prepare_rmats_input
 from rmaps_core.path_utils import build_subprocess_env, repo_root, resolve_user_path
 from rmaps_core.stat_utils import normalize_stat_method
+from rmaps_core.output_utils import ensure_output_directory, write_run_manifest, se_output_targets
 
 
 PYTHON = sys.executable
@@ -119,6 +122,12 @@ def run_motif_map(
     stat_seed: int | None = None,
     keep_temp: bool = False,
     base_cwd: Path | None = None,
+    delete_temp: bool = False,
+    overwrite: bool = False,
+    allow_overlap: bool = False,
+    fisher_alternative: str = "greater",
+    workers: int | None = None,
+    exon_window: int | None = None,
 ) -> int:
     """
     Build and run the legacy motifMap* script for a given event type.
@@ -138,6 +147,12 @@ def run_motif_map(
     up = resolve_user_path(up, base_cwd)
     down = resolve_user_path(down, base_cwd)
     background = resolve_user_path(background, base_cwd)
+    # AUDIT F8: reject reuse before XLSX preparation can modify an existing run.
+    if event.lower() == "se":
+        # AUDIT S1: include engine and XLSX targets before archival or conversion.
+        ensure_output_directory(output, overwrite=overwrite,
+                                target_paths=se_output_targets(known_motifs, motifs, rmats, miso))
+    original_rmats = rmats
     rmats = maybe_prepare_rmats_input(rmats, output)
     cmd: list[str] = [
         PYTHON,
@@ -180,7 +195,36 @@ def run_motif_map(
     if separate:
         cmd.append("--separate")
 
+    if event.lower() == "se":
+        # AUDIT F15: pass the explicit Fisher tail to the SE engine.
+        if fisher_alternative not in ("greater", "two-sided"):
+            raise ValueError("fisher_alternative must be greater or two-sided")
+        cmd.extend(["--fisher-alternative", fisher_alternative])
+        # AUDIT R1: preserve W by default; permit a separate complete exon window.
+        if exon_window is not None:
+            if exon_window < 1:
+                raise ValueError("exon_window must be at least 1")
+            cmd.extend(["--exon-window", str(exon_window)])
+        # AUDIT F20: bound SE concurrency, including single-CPU systems.
+        workers = workers if workers is not None else min(4, max(1, (os.cpu_count() or 1) - 1))
+        if workers < 1:
+            raise ValueError("workers must be at least 1")
+        cmd.extend(["--workers", str(workers)])
+        # AUDIT F13: cross-set overlap remains an explicit opt-in.
+        if allow_overlap:
+            cmd.append("--allow-overlap")
+        # AUDIT R8: parent preflight already archived any prior manifest once.
+        # Prepared XLSX and unowned files require the engine's reuse permission.
+        if overwrite or rmats != original_rmats:
+            cmd.append("--overwrite")
+        # AUDIT F7: retain positional tables unless deletion is requested.
+        if delete_temp:
+            cmd.append("--delete-temp")
+
     env_overrides = {"RMAPS_STAT_METHOD": stat_method}
+    if event.lower() == "se":
+        # AUDIT S1: the engine must not archive/refuse this already checked run again.
+        env_overrides["RMAPS_PREFLIGHT_OUTPUT"] = str(output.resolve())
     if stat_permutations is not None:
         env_overrides["RMAPS_STAT_PERMUTATIONS"] = str(stat_permutations)
     if stat_seed is not None:
@@ -188,9 +232,25 @@ def run_motif_map(
 
     code = run_subprocess(cmd, env_overrides, base_cwd=base_cwd)
 
-    # Keep temp data on failure for debugging; clean on success unless requested.
-    if code == 0 and not keep_temp:
+    # AUDIT F7: SE owns explicit cleanup; other event types retain prior behavior.
+    if code == 0 and event.lower() != "se" and not keep_temp:
         shutil.rmtree(output / "temp", ignore_errors=True)
+
+    # AUDIT F8: include the wrapper-created XLSX conversion in this run's manifest.
+    manifest = output / "run_manifest.json"
+    if code == 0 and event.lower() == "se" and rmats != original_rmats and manifest.exists():
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        # AUDIT R3: keep deleted summary-input hashes instead of trying to reopen them.
+        prepared = Path(rmats)
+        parameters = payload["parameters"]
+        parameters["original_rmats"] = original_rmats
+        parameters["overwrite"] = overwrite
+        write_run_manifest(output, [prepared], parameters,
+                           preserved_entries=payload["outputs"],
+                           delete_files=[prepared] if delete_temp else [])
+        temp = output / "temp"
+        if delete_temp and temp.exists() and not any(temp.iterdir()):
+            temp.rmdir()
 
     return code
 

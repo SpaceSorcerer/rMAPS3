@@ -24,25 +24,29 @@ def load_genome(build: str, base_dir: str) -> Fasta:
 
 def fetch_seq(fasta: Fasta, strand: str, chrom: str, start: int, end: int) -> str:
     """
-    Fetch sequence from a pyfaidx Fasta, matching legacy sequence behavior:
+    Fetch sequence from a pyfaidx Fasta:
     - 0-based, end-exclusive slicing
     - reverse-complement on '-' strand
-    - on any error, return a string of Ns of the requested length
+    - clip chromosome edges and pad in genomic orientation before reverse complement
+    - missing chromosomes and fetch failures raise with coordinate context
     """
     length = end - start
     if length <= 0:
         return ""
+    # AUDIT F5: fail explicitly and pad before orientation conversion.
     try:
-        record = fasta[chrom][start:end]
-        seq = str(record)
+        chromosome_length = len(fasta[chrom])
+        lo = min(chromosome_length, max(0, start))
+        hi = min(chromosome_length, max(0, end))
+        seq = str(fasta[chrom][lo:hi])
+        if len(seq) != hi - lo:
+            raise ValueError("FASTA returned a truncated sequence")
+        left_pad = min(length, max(0, -start))
+        right_pad = length - left_pad - len(seq)
+        seq = "N" * left_pad + seq + "N" * right_pad
         if strand == "-":
             seq = revcomp(seq)
-        if len(seq) != length:
-            if len(seq) < length:
-                seq = (seq + ("N" * length))[:length]
-            else:
-                seq = seq[:length]
         return seq.upper()
-    except Exception:
-        return "N" * length
+    except Exception as exc:
+        raise ValueError(f"Cannot fetch {chrom}:{start}-{end} ({strand}): {exc}") from exc
 

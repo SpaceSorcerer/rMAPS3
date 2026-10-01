@@ -139,3 +139,125 @@ Open `http://127.0.0.1:5000`.
 ## Troubleshooting
 
 See [`docs/FAQ.md`](docs/FAQ.md) for common setup and runtime issues.
+
+## Lab fork: branch `lab/miat-qki`
+
+This branch adds a lab layer on top of the collaborators' engine. `main` mirrors upstream
+`b9a9dce` (tag `upstream-base-2026-09-16`). The SE engine repairs are `eaeb303`, `c34776b`
+(tag `audited-engine-2026-09-16`) and `3faead9`. Everything else lives in `tools/`, `tests/`,
+`data/`, `configs/` and `docs/`. Release tag: `lab-v1.0-2026-09-24`.
+[LESSONS.md](LESSONS.md) records every decision below with its date and evidence. Scope is human /
+GRCh38 (hg38) / GENCODE v49 unless the inputs say otherwise, and SE events only.
+
+### Layer stack
+
+| Layer | What it is | Report it as | Produced by |
+|---|---|---|---|
+| Main | The authors' released engine (`b9a9dce`) run with `--stat-method mannwhitney`: a one-sided rank-sum on per-exon motif hit counts, reduced to the smallest p over the 50-nt windows of a region | RBP ORDER only. Its p is scipy's tie-corrected normal approximation on >99 % zeros and is severely anti-conservative | the engine, then `tools/countdist_to_npz.py` and `tools/verify_ranksum_archives.py` |
+| Supplement | The same statistic with a Westfall–Young label-permutation p over target-exon clusters (two stages, seed 149), BH q over unique k-mers, and RBP-level min-P over each RBP's motifs | the p and q to report. Every calibrated p is a valid permutation p: stage-1 B = 2,000 (resolution 1/2,001), or stage-2 B = 100,000 (resolution 1/100,001), which a test reports only when its own stage-1 p ≤ 0.005; `calib_perms_used` gives each p's B. BH over them controls the FDR under PRDS-type dependence; PRDS is assumed, not proven ([docs/two_stage_validity.md](docs/two_stage_validity.md)) | `tools/calibrate_ranksum_v2.py` (calibration v2.1) |
+| Sensitivities | Row-unit calibration (`*_rowunit` columns), row vs target-exon unit, length-matched background, method comparison, count-aware tests | labelled comparisons, never the p | `calibrate_ranksum.py`, `unit_sensitivity.py`, `length_matched.py`, `compare_stat_methods.py`, `count_aware_stats.py` |
+| Stability | Foreground-bootstrap rank stability on an audited Fisher run | how many top RBPs are reproducible | `tools/rank_stability.py` |
+| Figures | Region lollipops, version 4.3.3: both layers, by-RBP and by-motif, with and without core-spliceosome and broad binders | — | `tools/build_region_lollipops_v4.py` |
+
+Rules that follow from the stack:
+
+- Lab statistics are never painted onto the tool's own output.
+- One figure never mixes two engines, two statistics or two permutation units.
+- Every count reads "n events (rMATS SE rows) over N target exons".
+
+The audited engine's `mannwhitney` binarizes before ranking, so it is not an alternative main
+layer. The audited Fisher layer of 2026-09-16 is superseded. `tools/summarize_rmaps_regions*.py`
+and `tools/rmaps3_lab_run.py` remain for reproduction.
+
+### Tools and skills
+
+[`tools/README.md`](tools/README.md) lists every tool with its purpose, layer and status
+(CANONICAL / SENSITIVITY / SUPERSEDED). Two lab skills wrap
+[`tools/rmaps3_skill_run.py`](tools/rmaps3_skill_run.py):
+
+- **`rmaps3-quick`** runs `--mode quick`. It gives the authors' layer only: the engine run, the verified count archives, `quick_summary.xlsx`, the four main-layer figures and `index.html`.
+- **`rmaps3-full`** runs `--mode full`. It adds the row-unit sensitivity, the reportable v2.1 supplement, rank stability when an audited run is given, the v4.3.3 figures of both layers and the rank workbook.
+- **Completeness.** A run is `complete` (exit 0) only when every artefact its mode, engine and statistic require (`REQUIRED_ARTIFACTS` in the wrapper) exists, is non-empty and has its sha256 in `run_manifest.json`; otherwise it is `INCOMPLETE` (exit 4), or `complete_partial` (exit 0) with `--allow-partial`. A failed positive control gives `complete_with_failed_positive_control` (exit 3), an exception `failed` (exit 1), a refused argument exit 2 before any output exists. Every required path is listed once, in the wrapper's `REQUIRED_ARTIFACTS[mode][engine][stat]`; per-motif archives expand over every motif of the root tables, so a partial conversion is `INCOMPLETE`. Every writer of the wrapper and the figure builder registers each file it writes (`tools/rmaps_artifacts.py`); `run_manifest.json` lists them under `registered` and hashes every one, and `tests/test_artifact_inventory.py` asserts on synthetic runs of every mode that `REQUIRED_ARTIFACTS`, the registered files and the files on disk are the same set. Only the engine's own output directory and the matplotlib font cache under `stability/` are listed as directories, because a third party names their files; each file in them is still registered and hashed. `rmaps3_skill_run.py --verify <OUT_DIR>` re-hashes a finished run against its manifest: one lost or changed file gives `INCOMPLETE` (exit 4).
+- **Gate rule.** The event-set rule comes only from `--gate-rule` or the gate record's `rule` field, never from the arm name; the wrapper prints it in `versions.txt`, the workbook README and the figure footer. Pre-split input without either is refused.
+- **Two stages.** Each test reports its stage-2 p only when its own stage-1 p ≤ `--refine-threshold` (0.005), and its stage-1 p otherwise, so every calibrated p is super-uniform at every α and BH over them controls the FDR under PRDS (`docs/two_stage_validity.md`).
+
+The wrapper carries no site paths. Pass the genome root, the released-engine checkout, the
+GENCODE GTF and the two exclusion lists explicitly. The skills hold the lab's values.
+
+### Environment
+
+- **Packages.** `requirements-lock.txt` pins every package the full lab chain imports, for Python 3.11. Install it into a fresh venv with `pip install -r requirements-lock.txt`. `requirements.txt` stays the upstream engine's minimal list.
+- **Lab interpreters.** `E:\rmaps_venv2` satisfies the lock: Python 3.11.15 from the conda env `codex_py`, `python -m venv`, then `pip install -r requirements-lock.txt`; the lock is its `pip freeze`. Observed 2026-09-24 at v1.0.1c: full suite 314 passed, 0 skipped. `E:\rmaps_venv` lacks pandas, PyYAML and tzdata; the same day it gave 309 passed, 3 skipped (the pandas-only module and two lock-environment release checks). Details: `_lab/ENV_2026-09-24.md` in the lab checkout.
+- **CI.** GitHub Actions on the fork: https://github.com/SpaceSorcerer/rMAPS3/actions/workflows/ci.yml?query=branch%3Alab%2Fmiat-qki. Job `test` is the upstream CLIP and CLI suite; job `lab-fork` installs `requirements-lock.txt` and runs the pytest suite. Every tag from `lab-v1.0.2-2026-09-26` on names, in its message, the run in which both jobs passed on the tagged commit.
+- **Engine pin.** With `--engine released` the wrapper refuses to start unless `--engine-root` is a git checkout at `--engine-commit` (default `b9a9dce`) with no modified or untracked file. `versions.txt` records the verified SHA.
+- **Unversioned inputs.** The FASTA and its index, the GTF, the motif tables, the alias table, the exclusion lists, the gate record and the event sets are not shipped. The wrapper writes the sha256 of each one it was given to `versions.txt` and `run_manifest.json`.
+
+### Reproduce one arm end to end
+
+A checkout of the released engine is needed. For example:
+
+```bash
+git worktree add ../rMAPS3_upstream upstream-base-2026-09-16
+```
+
+Then, from the repository root, with pre-split inputs and their gate record:
+
+```bash
+python tools/rmaps3_skill_run.py --mode full --arm QKI_KO_B --out results/QKI_KO_B \
+  --up up.coord.txt --dn dn.coord.txt --bg bg.coord.txt --gate-counts counts.json --gate-rule B \
+  --genome-root genomedata --genome hg38 \
+  --engine released --engine-root ../rMAPS3_upstream --stat-method mannwhitney \
+  --permutations 2000 --refine-perms 100000 --seed 149 \
+  --gtf gencode.v49.primary_assembly.annotation.gtf \
+  --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt \
+  --positive-control QKI --arm-label "QKI knockout (rMATS ∩ VAST-tools concordant events)"
+```
+
+`--arm-label` is the figure and index title and is required whenever figures are drawn; it is never
+derived from the arm name. The titles of the seven dissertation arms are in
+`data/arm_labels_dissertation.tsv`.
+
+`--rmats-se SE.MATS.JC.txt --filter gates.json` replaces the three set flags and
+`--gate-counts`. The wrapper then pre-splits with `tools/build_event_sets.py`, which implements
+rule A only, so raw input is rule A under any arm name and `--gate-rule B` or `Beffect` with raw
+input is refused: rule B sets are frozen concordant files, supplied pre-split. The output root must
+be absent or empty.
+
+The same chain, step by step, reads and writes explicit roots:
+
+```bash
+python tools/countdist_to_npz.py --arm QKI_KO_B --released-root runs --out-root counts
+python tools/verify_ranksum_archives.py --arm QKI_KO_B --released-root runs --counts-root counts
+python tools/calibrate_ranksum.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary_rowunit --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --permutation-unit row --seed 149
+python tools/calibrate_ranksum_v2.py --arm QKI_KO_B --counts-root counts --released-root runs --out-root summary --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --rowunit-root summary_rowunit --seed 149
+python tools/build_region_lollipops_v4.py --arms QKI_KO_B --out-root figures --released-root runs --calibrated-root summary --counts-json QKI_KO_B=counts.json --gate-rule QKI_KO_B=B --arm-label "QKI_KO_B=QKI knockout (rMATS ∩ VAST-tools concordant events)" --positive-control QKI --alias-table data/rbp_alias_hgnc_2026-09-17.tsv --gtf gencode.v49.primary_assembly.annotation.gtf --spliceosome-list spliceosome_census.txt --broad-binders-list broad_binders.txt
+```
+
+Here `runs/QKI_KO_B/` is the released engine's output directory, run with `--keep-temp`.
+
+Checks to read before trusting a run:
+
+- `counts/<ARM>/VERIFY.md` shows that the archives reproduce every root-table value and every per-position value by exact float equality. Any mismatch, missing table or changed countDist file aborts the run and deletes nothing.
+- `summary/<ARM>/refinement_report.json` gives the stage record, the BH family sizes, and the events and target exons per set.
+- `figures/positive_control_audit.tsv`, written when `--positive-control` is given (QKI for a QKI-KO arm), checks that the symbol ranks first in INCLUDED × Upstream Intron and SKIPPED × Downstream Intron. The builder takes the gate record by its path (`--counts-json ARM=PATH`), the title from `--arm-label` and the control from `--positive-control`; nothing is read from the arm name.
+
+### Pre-split input format
+
+Each of `up`, `dn` and `bg` is a nonempty tab-separated file with this mandatory eight-column
+header. The spaces shown here must be tabs in the file.
+
+```text
+chr strand exonStart exonEnd firstExonStart firstExonEnd secondExonStart secondExonEnd
+```
+
+- **Coordinates.** Starts are zero-based and ends exclusive; keep rMATS values unchanged. `firstExon` is genomic-left and `secondExon` genomic-right on both strands. Strand is `+`/`-`. Do not add gene identifiers.
+- **Lab gate.** The lab uses the RBP-RELI `reli_v121` ledger gate. Its four named parts are rMATS FDR, |dPSI|, IJC+SJC in every sample, and DESeq2 baseMean.
+  - Background takes the same coverage and expression gates plus a high-FDR floor, with the foreground removed.
+  - Genes absent from the expression table are `expr_unknown` and retained.
+  - Read the values from the gate ledger, not from this README.
+- **Chromosome names.** Names are checked against `<root>/<build>/<build>.fa.fai`. A literal `chr` is added or removed only when that resolves an existing key; unresolved names fail. This is name normalisation, not liftover.
+- **Engine outputs.** Root `pVal.*.RNAmap.txt` tables hold raw regional minima, not calibrated region p-values. Keep `temp/` until the archives verify. The wrapper deletes exactly the files listed in the verifier's `verified_temporaries.tsv`, only after the verifier exits 0, and only when each still matches its listed md5. It logs each one in `logs/temp_deletion.log`.
+
+Read [the migration note](docs/MIGRATION_2026-09.md) for complete-window geometry, FASTA
+crops and the NPZ schema. The repaired engine is not numerically equivalent to the old
+web-server calculation merely because both report Fisher p-values.
