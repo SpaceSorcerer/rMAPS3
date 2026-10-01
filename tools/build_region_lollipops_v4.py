@@ -42,7 +42,7 @@ from matplotlib.patches import Rectangle
 import numpy as np
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
-from scipy.stats import rankdata
+from scipy.stats import false_discovery_control, rankdata
 
 REGIONS = ['Upstream Intron', 'Exon Body', 'Downstream Intron']
 DIRECTIONS = ['INCLUDED', 'SKIPPED']
@@ -60,6 +60,7 @@ RELEASED_COMMIT = 'b9a9dce'
 STAT_METHOD = 'mannwhitney'
 FIG_VERSION = '4.3.3'
 SFX = '_v43'
+Q_FAMILIES = ['pooled', 'per_panel']  # RBP-level BH family: the calibration's own (default) or one per panel
 RBP_LEVEL_COLUMNS = [('minp', 'rbp_calibrated_p_minp', 'rbp_calibrated_q_minp'),
                      ('maxz', 'rbp_calibrated_p_maxz', 'rbp_calibrated_q_maxz')]
 SCORE_FIELDS = ['fg_mean_count', 'bg_mean_count', 'count_ratio', 'fg_proportion', 'bg_proportion',
@@ -317,6 +318,13 @@ def bh_divisors(motif_rows, condensed_rows, rbp_column, report, arm):
 
 def family_text(refinement, by_rbp, short=False):
     """'BH q over <divisor actually used> ...' for legends, subtitles, sidecars and the index."""
+    if by_rbp and refinement.get('rbp_q_family') == 'per_panel':
+        sizes = sorted(set(refinement['rbp_bh_divisor_per_panel'].values()))
+        n = str(sizes[0]) if len(sizes) == 1 else f'{sizes[0]}–{sizes[-1]}'
+        if short:
+            return f'{n} RBP-level tests within each panel'
+        return (f'{n} RBP-level tests within each region × direction panel ({refinement["n_rbps"]} RBPs; '
+                f'{len(refinement["rbp_bh_divisor_per_panel"])} separate BH families)')
     if by_rbp:
         n, u = refinement['rbp_bh_divisor_used'], refinement['rbp_untestable_used']
         detail = f"{refinement['n_rbps']} RBPs × 2 directions × 3 regions"
@@ -330,8 +338,10 @@ def family_text(refinement, by_rbp, short=False):
     return f'{n} {noun} ({detail}' + (f'; {u} untestable cells excluded' if u else '') + ')'
 
 
-def calibrated_entries(arm, root, mappings):
-    """Westfall-Young calibrated rank-sum summary -> pooled-region entries (one per motif x panel)."""
+def calibrated_entries(arm, root, mappings, q_family='pooled'):
+    """Westfall-Young calibrated rank-sum summary -> pooled-region entries (one per motif x panel).
+
+    q_family 'per_panel' replaces the RBP-level q with BH within each direction x pooled-region panel."""
     base = Path(root) / arm
     table = base / 'per_motif_regions.tsv'
     report = json.loads((base / 'refinement_report.json').read_text())
@@ -343,6 +353,7 @@ def calibrated_entries(arm, root, mappings):
         if key not in report:
             raise ValueError(f'{arm}: refinement_report.json lacks {key}; not a calibration v2 summary')
     rbp_level, rbp_column = load_rbp_level(base / 'condensed_per_rbp.tsv', arm)
+    per_panel_divisors = per_panel_rbp_q(rbp_level) if q_family == 'per_panel' else None
     log = (base / 'command.log').read_text()
     if not log_ok(base / 'command.log'):
         raise ValueError(f'Calibration run for {arm} did not record exit=0; refusing to plot a partial summary')
@@ -389,6 +400,8 @@ def calibrated_entries(arm, root, mappings):
             raise ValueError(f'{arm}: no RBP-level row for {k}')
         e.update(rbp_level[k])
     report = dict(report, rbp_level_column=rbp_column)
+    if per_panel_divisors is not None:
+        report = dict(report, rbp_q_family='per_panel', rbp_bh_divisor_per_panel=per_panel_divisors)
     apply_naming(entries, mappings)
     for e in entries:
         e['_label'] = rbp_label(e)
@@ -473,6 +486,22 @@ def load_rbp_level(table, arm):
                   '_n_target_exons': (int(r['n_changed_included_target_exons']),
                                       int(r['n_changed_skipped_target_exons']))}
     return out, name
+
+
+def per_panel_rbp_q(rbp_level):
+    """Replace each RBP-level q, in place, by BH over the finite RBP-level p of its own direction x region panel.
+
+    The calibration's pooled q stays in '_rbp_q_minp' / '_rbp_q_maxz'. Returns {'DIRECTION|region': divisor}."""
+    panels = defaultdict(list)
+    for (_, direction, region), v in rbp_level.items():
+        panels[(direction, region)].append(v)
+    divisors = {}
+    for (direction, region), rows in sorted(panels.items()):
+        finite = [v for v in rows if math.isfinite(v['_rbp_p'])]
+        for v, q in zip(finite, false_discovery_control(np.array([v['_rbp_p'] for v in finite]), method='bh')):
+            v['_rbp_q'] = float(q)
+        divisors[f'{direction}|{region}'] = len(finite)
+    return divisors
 
 
 def length_clause(arm, root):
@@ -1656,7 +1685,11 @@ def build_rank_comparison(arm, layer_panels, v31_tsv, method_tsv, refinement, de
                                       'permutation unit, kept for comparison only. rbp_calibrated_q_minp / _maxz / _meanz: the three RBP-level q '
                                       'columns side by side (NA when that column is not in the calibration summary). '
                                       'Source: <calibrated-root>/<ARM>/{per_motif_regions,'
-                                      'condensed_per_rbp}.tsv. Nothing is recomputed.'),
+                                      'condensed_per_rbp}.tsv. '
+                                      + ('Nothing is recomputed.' if not refinement or
+                                         refinement.get('rbp_q_family') != 'per_panel' else
+                                         'calibrated_ranksum_q is recomputed (--q-family per_panel: BH within each '
+                                         'panel); everything else is read, not recomputed.')),
         ('Sheet: Panel comparisons', 'Spearman rho of the paired average-rank vectors and top-10 overlap for every '
                                      'layer pair inside one panel; rho is NA when a rank vector is constant.'),
         ('Sheet: Summary', 'Arithmetic mean of rho and of top-10 overlap over the six panels; '
@@ -1900,6 +1933,10 @@ def main(argv=None):
     ap.add_argument('--gate', default='persample10_bm50_bgfdr0.5',
                     help='gate name printed in the dissertation-default provenance sentence; a label, never a path')
     ap.add_argument('--top-n', type=int, default=10)
+    ap.add_argument('--q-family', choices=Q_FAMILIES, default='pooled',
+                    help="RBP-level BH family for the byRBP calibrated layer: 'pooled' (default) = the calibration's "
+                         "own q over all panels; 'per_panel' = BH over the RBP-level p within each direction x "
+                         "pooled-region panel (the pooled q stays in the rank comparison as rbp_calibrated_q_minp)")
     ap.add_argument('--gate-text', default=None,
                     help='footer gate sentence; up to 3 lines separated by \\n; placeholders {rule}, {n_up}, {n_dn}, '
                          '{n_bg}, {n_expr_unknown_in_fg}, {n_expr_unknown_in_bg}. Default: the dissertation '
@@ -1988,7 +2025,7 @@ def main(argv=None):
         calib_log = calib_path.with_name('command.log')
         if (calib_path.is_file() and calib_path.with_name('refinement_report.json').is_file()
                 and log_ok(calib_log)):
-            entries, calib_sources, report = calibrated_entries(arm, args.calibrated_root, mappings)
+            entries, calib_sources, report = calibrated_entries(arm, args.calibrated_root, mappings, args.q_family)
             layers['calibrated_ranksum'] = entries
             sources += calib_sources
             refinement = dict(report)
@@ -2156,7 +2193,12 @@ def main(argv=None):
             prov.append(f'- Cross-check: the native rank-sum p of all {crosschecked} pooled tests in the calibration '
                         'summary equals the released root table value to a relative tolerance of 1e-9, so both layers '
                         'describe the same statistic.')
-        prov += ['- No p-value or q-value is recomputed by this script. Colour (v4.3): hue = direction, included '
+        prov += [('- No p-value or q-value is recomputed by this script. '
+                  if not refinement or refinement.get('rbp_q_family') != 'per_panel' else
+                  '- No p-value is recomputed by this script. --q-family per_panel: the byRBP RBP-level q is BH '
+                  '(scipy.stats.false_discovery_control) over the RBP-level calibrated p within each direction x '
+                  'pooled-region panel; the pooled q of the calibration is kept as rbp_calibrated_q_minp in the rank '
+                  'comparison. byMotif q is unchanged. ') + 'Colour (v4.3): hue = direction, included '
                  '#E69F00 and skipped #0072B2 (RBP-RELI INCL_GOLD / SKIP_BLUE, build_region_resolved_lollipop.py); '
                  'value >= 0.05 = Okabe-Ito grey #999999; below 0.05 the colour runs in OKLCh with the hue fixed '
                  '(v4.3.2): lightness from the tint (lightness/chroma of the RBP-RELI ramp first stop #F4E3B8 / '
